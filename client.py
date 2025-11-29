@@ -546,6 +546,17 @@ def build_cipher_packet(my_username: str, dest: str, k_enc: bytes, k_mac: bytes,
     b64_tag = base64.b64encode(tag).decode("utf-8")
     return b64_header, b64_blob, b64_iv, b64_cipher, b64_tag
 
+def send_plaintext_message(sock: socket.socket, dest: str, msg_str: str):
+    """
+    Mensagem SEM cifragem, SEM HMAC e SEM assinatura.
+    Apenas texto em claro (inseguro).
+    """
+    wire = f"TO {dest} {msg_str}\n"
+    try:
+        sock.sendall(wire.encode("utf-8"))
+        print(f"[MSG] Mensagem EM CLARO enviada para {dest}.")
+    except Exception as e:
+        print(f"[ERRO] Nao foi possivel enviar TO: {e}")
 
 def send_secure_message(sock: socket.socket, my_username: str, dest: str, msg_str: str):
     """
@@ -690,6 +701,7 @@ def main():
     print("-----------------------------------------------------")
     print("[INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.")
     print("Comandos (chat + DH):")
+    print("  /to <dest> <mensagem>         -> enviar EM CLARO (SEM segurança)")
     print("  /send <dest> <mensagem>       -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)")
     print("  /send_signed <dest> <mensagem>-> enviar mensagem CIFRADA + ASSINADA digitalmente")
     print("  /list                         -> listar utilizadores online")
@@ -718,6 +730,15 @@ def main():
                     sock.sendall(b"LIST\n")
                 except Exception as e:
                     print(f"[ERRO] Nao foi possivel enviar LIST: {e}")
+                continue
+            
+            if line.startswith("/to "):
+                parts = line.split(" ", 2)
+                if len(parts) < 3:
+                    print("Uso: /to <dest> <mensagem>")
+                    continue
+                _, dest, msg = parts
+                send_plaintext_message(sock, dest, msg)
                 continue
 
             # /send -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
@@ -774,7 +795,7 @@ def main():
                 break
 
             print(
-                "Comando desconhecido. Use /send, /send_signed, /list, "
+                "Comando desconhecido. Use /to, /send, /send_signed, /list, "
                 "/getpk, /dh_start, /dh_show, /quit"
             )
 
