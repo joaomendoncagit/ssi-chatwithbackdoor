@@ -1,20 +1,22 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 # ===============================================================
-# CHATWITHBACKDOOR - CLIENTE V4 (CIFRA + HMAC + BACKDOOR + ASSINATURA)
+# CHATWITHBACKDOOR - CLIENTE (CIFRA + HMAC + BACKDOOR+BLOB + ASSINATURA)
 # ===============================================================
-# Diferenças para V3.1:
-#   - Novo comando: /send_signed <dest> <mensagem>
-#   - Cada mensagem enviada com /send_signed é:
-#        msg_bytes = mensagem em UTF-8
-#        signature = Sign(sk.username, msg_bytes)  (RSA-PSS + SHA256)
-#        b64_sig   = base64(signature)
-#        plaintext = msg_bytes || b"||SIG||" || b64_sig
-#     Este plaintext é então cifrado com AES-CBC (como antes) e autenticado com HMAC.
-#   - Ao receber:
-#       * Se plaintext contiver "||SIG||", tenta separar msg + assinatura,
-#         obter pk do emissor (via /getpk <user>) e verificar a assinatura.
+#   - Implementa o backdoor com "blob" alinhado com o diagrama:
+#       blob   = AES-ECB_Encrypt(K_SERVER, K_enc)
+#       IV     = primeiros 16 bytes de blob (na prática blob inteiro)
+#       tag    = HMAC(K_mac, header || blob || IV || C)
+#   - Protocolo MSG e MSG_FROM passam a incluir blob:
+#       MSG dest b64_header b64_blob b64_iv b64_cipher b64_tag
+#
+#   Funcionalidades já presentes:
+#     - Par de chaves RSA local por utilizador
+#     - REGISTER: manda username + chave publica para o servidor
+#     - LOGIN com assinatura de nonce (RSA-PSS)
+#     - DH efémero (X25519) entre clientes
+#     - K_enc, K_mac derivadas do segredo DH
+#     - Mensagens cifradas AES-CBC + HMAC-SHA256
+#     - Backdoor no servidor (blob)
+#     - /send_signed => mensagem cifrada + assinatura digital embedada
 # ===============================================================
 
 import socket
@@ -172,16 +174,17 @@ def handle_server_line(line: str):
     if not line:
         return
 
-    # MSG_FROM orig b64_header b64_iv b64_cipher b64_tag
+    # MSG_FROM orig b64_header b64_blob b64_iv b64_cipher b64_tag
     if line.startswith("MSG_FROM "):
-        parts = line.split(" ", 5)
-        if len(parts) < 6:
+        parts = line.split(" ", 6)
+        if len(parts) < 7:
             print(f"[SERVIDOR] Linha MSG_FROM mal formada: {line}")
             return
-        _, orig, b64_header, b64_iv, b64_cipher, b64_tag = parts
+        _, orig, b64_header, b64_blob, b64_iv, b64_cipher, b64_tag = parts
 
         try:
             header = base64.b64decode(b64_header.encode("utf-8"), validate=True)
+            blob = base64.b64decode(b64_blob.encode("utf-8"), validate=True)
             iv = base64.b64decode(b64_iv.encode("utf-8"), validate=True)
             cipher = base64.b64decode(b64_cipher.encode("utf-8"), validate=True)
             tag = base64.b64decode(b64_tag.encode("utf-8"), validate=True)
@@ -199,7 +202,7 @@ def handle_server_line(line: str):
         k_enc = st["k_enc"]
         k_mac = st["k_mac"]
 
-        calc_tag = hmac_sha256(k_mac, header + iv + cipher)
+        calc_tag = hmac_sha256(k_mac, header + blob + iv + cipher)
         if not hmac.compare_digest(calc_tag, tag):
             print(f"[MSG] HMAC invalido para mensagem de {orig} (mensagem corrompida/alterada).")
             return
@@ -220,7 +223,6 @@ def handle_server_line(line: str):
             try:
                 msg_part, sig_b64 = text.rsplit("||SIG||", 1)
             except ValueError:
-                # Marker estranho, tratamos como mensagem normal
                 print(f"FROM {orig} [cifrado+HMAC]: {text}")
                 return
 
@@ -231,7 +233,6 @@ def handle_server_line(line: str):
                 print(f"FROM {orig} [cifrado+HMAC+ASSIN_MALFORMADA]: {msg_part}")
                 return
 
-            # Tentar ir buscar chave publica do emissor
             with peer_pk_lock:
                 der = peer_pubkeys.get(orig)
 
@@ -246,7 +247,6 @@ def handle_server_line(line: str):
                 print(f"FROM {orig} [cifrado+HMAC][PK INVALIDA LOCAL]: {msg_part}")
                 return
 
-            # Verificar assinatura RSA-PSS/SHA256
             try:
                 pubkey.verify(
                     sig_bytes,
@@ -524,25 +524,27 @@ def show_dh_sessions():
 
 
 # ---------------------------------------------------------------
-# ENVIO SEGURO (CIFRA + HMAC + BACKDOOR)
+# ENVIO SEGURO (CIFRA + HMAC + BACKDOOR COM BLOB)
 # ---------------------------------------------------------------
 def build_cipher_packet(my_username: str, dest: str, k_enc: bytes, k_mac: bytes, msg_bytes: bytes):
     """
-    Constrói (b64_header, b64_iv, b64_cipher, b64_tag) prontos para enviar em MSG.
+    Constrói (b64_header, b64_blob, b64_iv, b64_cipher, b64_tag) prontos para enviar em MSG.
     """
     header = f"{my_username}->{dest}".encode("utf-8")
 
-    # IV deterministicamente derivado de K_enc, com chave secreta K_SERVER
-    iv = aes_encrypt_ecb(K_SERVER, k_enc)
+    # Backdoor: blob = AES-ECB(K_SERVER, K_enc), IV = primeiros 16 bytes de blob
+    blob = aes_encrypt_ecb(K_SERVER, k_enc)
+    iv = blob[:16]
 
     cipher = aes_encrypt_cbc(k_enc, iv, msg_bytes)
-    tag = hmac_sha256(k_mac, header + iv + cipher)
+    tag = hmac_sha256(k_mac, header + blob + iv + cipher)
 
     b64_header = base64.b64encode(header).decode("utf-8")
+    b64_blob = base64.b64encode(blob).decode("utf-8")
     b64_iv = base64.b64encode(iv).decode("utf-8")
     b64_cipher = base64.b64encode(cipher).decode("utf-8")
     b64_tag = base64.b64encode(tag).decode("utf-8")
-    return b64_header, b64_iv, b64_cipher, b64_tag
+    return b64_header, b64_blob, b64_iv, b64_cipher, b64_tag
 
 
 def send_secure_message(sock: socket.socket, my_username: str, dest: str, msg_str: str):
@@ -560,11 +562,11 @@ def send_secure_message(sock: socket.socket, my_username: str, dest: str, msg_st
     k_mac = st["k_mac"]
 
     plaintext = msg_str.encode("utf-8")
-    b64_header, b64_iv, b64_cipher, b64_tag = build_cipher_packet(
+    b64_header, b64_blob, b64_iv, b64_cipher, b64_tag = build_cipher_packet(
         my_username, dest, k_enc, k_mac, plaintext
     )
 
-    wire = f"MSG {dest} {b64_header} {b64_iv} {b64_cipher} {b64_tag}\n"
+    wire = f"MSG {dest} {b64_header} {b64_blob} {b64_iv} {b64_cipher} {b64_tag}\n"
     try:
         sock.sendall(wire.encode("utf-8"))
         print(f"[MSG] Mensagem cifrada enviada para {dest}.")
@@ -600,15 +602,14 @@ def send_signed_message(sock: socket.socket, my_username: str, dest: str, msg_st
     )
     b64_sig = base64.b64encode(signature).decode("utf-8")
 
-    # Atenção: se a mensagem contiver literalmente "||SIG||", isto pode baralhar o parser.
-    # Para o projeto chega bem evitar esse padrão no texto das mensagens.
+    # Nota: evitar "||SIG||" literalmente no texto da mensagem.
     plaintext = (msg_str + "||SIG||" + b64_sig).encode("utf-8")
 
-    b64_header, b64_iv, b64_cipher, b64_tag = build_cipher_packet(
+    b64_header, b64_blob, b64_iv, b64_cipher, b64_tag = build_cipher_packet(
         my_username, dest, k_enc, k_mac, plaintext
     )
 
-    wire = f"MSG {dest} {b64_header} {b64_iv} {b64_cipher} {b64_tag}\n"
+    wire = f"MSG {dest} {b64_header} {b64_blob} {b64_iv} {b64_cipher} {b64_tag}\n"
     try:
         sock.sendall(wire.encode("utf-8"))
         print(f"[MSG] Mensagem CIFRADA + ASSINADA enviada para {dest}.")
@@ -689,8 +690,7 @@ def main():
     print("-----------------------------------------------------")
     print("[INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.")
     print("Comandos (chat + DH):")
-    print("  /to <dest> <mensagem>         -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)")
-    print("  /send <dest> <mensagem>       -> alias para /to (envio cifrado)")
+    print("  /send <dest> <mensagem>       -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)")
     print("  /send_signed <dest> <mensagem>-> enviar mensagem CIFRADA + ASSINADA digitalmente")
     print("  /list                         -> listar utilizadores online")
     print("  /getpk <user>                 -> pedir chave publica RSA de <user> (para verificar assinaturas)")
@@ -720,17 +720,7 @@ def main():
                     print(f"[ERRO] Nao foi possivel enviar LIST: {e}")
                 continue
 
-            # /to -> envio cifrado
-            if line.startswith("/to "):
-                parts = line.split(" ", 2)
-                if len(parts) < 3:
-                    print("Uso: /to <dest> <mensagem>")
-                    continue
-                _, dest, msg = parts
-                send_secure_message(sock, username, dest, msg)
-                continue
-
-            # /send -> alias para envio cifrado
+            # /send -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
             if line.startswith("/send "):
                 parts = line.split(" ", 2)
                 if len(parts) < 3:
@@ -783,7 +773,10 @@ def main():
                     pass
                 break
 
-            print("Comando desconhecido. Use /to, /send, /send_signed, /list, /getpk, /dh_start, /dh_show, /quit")
+            print(
+                "Comando desconhecido. Use /send, /send_signed, /list, "
+                "/getpk, /dh_start, /dh_show, /quit"
+            )
 
     except KeyboardInterrupt:
         print("\n[INFO] Interrompido pelo utilizador (Ctrl+C).")
