@@ -541,6 +541,9 @@ Comandos (chat + DH):
 > /list
 > USERS Alice, Bob
 
+> /to Bob mensagem em plaintext, sem ser cifrada
+[MSG] Mensagem EM CLARO enviada para Bob.
+
 > /dh_start Bob
 [DH] Iniciado DH com Bob. A aguardar DH_REPLY_FROM Bob...
 > [DH] Sessao DH com Bob COMPLETA (lado iniciador).
@@ -561,6 +564,8 @@ Comandos (chat + DH):
 [MSG] Mensagem CIFRADA + ASSINADA enviada para Bob.
 > /send Bob !upper esta mensagem vai ser modificada # começa pela palavra !upper, e o server modifica
 [MSG] Mensagem cifrada enviada para Bob.
+> /send_signed Bob !upper mensagem assinada e modificada pelo servidor
+[MSG] Mensagem CIFRADA + ASSINADA enviada para Bob.
 > /quit
 [INFO] Cliente terminado.
 
@@ -582,6 +587,9 @@ OK REGISTER
 NONCE cL91vtLOjjx6zoHkJ3/Nc1u4kQEP+G0W3Srnvfvyxe4=
 OK LOGIN
 [SERVIDOR] Bob autenticou-se e entrou no chat.
+
+> FROM Alice: mensagem em plaintext, sem ser cifrada
+
 -----------------------------------------------------
 [INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.
 Comandos (chat + DH):
@@ -611,6 +619,7 @@ FROM Alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem assinada pela Alice
 > [INFO] Chave publica de Alice recebida e guardada (294 bytes DER).
 FROM Alice [cifrado+HMAC+ASSIN_OK]: outra mensagem assinada pela Alice
 FROM Alice [cifrado+HMAC]: ESTA MENSAGEM VAI SER MODIFICADA
+FROM Alice [cifrado+HMAC+ASSIN_FAIL]: MENSAGEM ASSINADA E MODIFICADA PELO SERVIDOR
 [SERVIDOR] Alice saiu do chat.
 
 > /quit
