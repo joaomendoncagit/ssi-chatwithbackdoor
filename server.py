@@ -1,8 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 # ===============================================================
-# CHATWITHBACKDOOR - SERVIDOR V3 (BACKDOOR + HMAC)
+# CHATWITHBACKDOOR - SERVIDOR (BACKDOOR + HMAC + BLOB)
 # ===============================================================
 # Funcionalidades:
 #   - Registo de utilizadores com chave publica RSA
@@ -10,11 +7,13 @@
 #   - Diretoria de chaves publicas: GET_PK
 #   - Encaminhamento de mensagens em claro (TO)   [modo antigo, so para debug]
 #   - Encaminhamento de mensagens cifradas (MSG)  [modo novo, com backdoor]
-#   - Backdoor:
-#       IV = AES-ECB_Encrypt(K_SERVER, K_enc)
-#       K_enc = AES-ECB_Decrypt(K_SERVER, IV)
-#       K_mac = SHA256(K_enc)
-#       tag   = HMAC_SHA256(K_mac, header || IV || C)
+#
+#   Backdoor (versao com blob, alinhada com o enunciado/diagrama):
+#       blob   = AES-ECB_Encrypt(K_SERVER, K_enc)
+#       IV     = primeiros 16 bytes de blob   (como K_enc tem 16 bytes, blob == IV)
+#       K_enc  = AES-ECB_Decrypt(K_SERVER, blob)
+#       K_mac  = SHA256(K_enc)
+#       tag    = HMAC_SHA256(K_mac, header || blob || IV || C)
 # ===============================================================
 
 import socket
@@ -33,7 +32,6 @@ HOST = "127.0.0.1"
 PORT = 5000
 
 # Chave secreta do servidor para a backdoor (AES-128)
-# (Na teoria, so o servidor devia conhecer esta chave.)
 K_SERVER = b"0123456789abcdef"  # 16 bytes
 
 # Utilizadores registados: username -> public_key (objeto cryptography)
@@ -123,7 +121,7 @@ def handle_client(conn: socket.socket, addr):
     authenticated = False
 
     try:
-        conn.sendall(b"OK Ligado ao ChatWithBackdoor v3. Use REGISTER ou LOGIN.\n")
+        conn.sendall(b"OK Ligado ao ChatWithBackdoor v3.1. Use REGISTER ou LOGIN.\n")
 
         while True:
             data = conn.recv(4096)
@@ -282,7 +280,7 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             # ---------------------------------------------------
-            # 5) DH_INIT: igual versao anterior (encaminhar)
+            # 5) DH_INIT: encaminhar
             # ---------------------------------------------------
             if line.startswith("DH_INIT "):
                 parts = line.split(" ", 2)
@@ -307,7 +305,7 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             # ---------------------------------------------------
-            # 6) DH_REPLY: igual versao anterior (encaminhar)
+            # 6) DH_REPLY: encaminhar
             # ---------------------------------------------------
             if line.startswith("DH_REPLY "):
                 parts = line.split(" ", 2)
@@ -367,16 +365,18 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             # ---------------------------------------------------
-            # 9) MSG <dest> <b64_header> <b64_iv> <b64_cipher> <b64_tag>
+            # 9) MSG <dest> <b64_header> <b64_blob> <b64_iv> <b64_cipher> <b64_tag>
             #     -> servidor usa backdoor para ler/alterar
             # ---------------------------------------------------
             if line.startswith("MSG "):
-                parts = line.split(" ", 5)
-                if len(parts) < 6:
-                    conn.sendall(b"ERR Uso: MSG <dest> <b64_header> <b64_iv> <b64_cipher> <b64_tag>\n")
+                parts = line.split(" ", 6)
+                if len(parts) < 7:
+                    conn.sendall(
+                        b"ERR Uso: MSG <dest> <b64_header> <b64_blob> <b64_iv> <b64_cipher> <b64_tag>\n"
+                    )
                     continue
 
-                _, dest, b64_header, b64_iv, b64_cipher, b64_tag = parts
+                _, dest, b64_header, b64_blob, b64_iv, b64_cipher, b64_tag = parts
 
                 with lock:
                     dest_sock = online_clients.get(dest)
@@ -387,6 +387,7 @@ def handle_client(conn: socket.socket, addr):
 
                 try:
                     header = base64.b64decode(b64_header.encode("utf-8"), validate=True)
+                    blob = base64.b64decode(b64_blob.encode("utf-8"), validate=True)
                     iv = base64.b64decode(b64_iv.encode("utf-8"), validate=True)
                     cipher = base64.b64decode(b64_cipher.encode("utf-8"), validate=True)
                     tag = base64.b64decode(b64_tag.encode("utf-8"), validate=True)
@@ -394,18 +395,18 @@ def handle_client(conn: socket.socket, addr):
                     conn.sendall(b"ERR MSG campos base64 invalidos\n")
                     continue
 
-                # 1) Recuperar K_enc a partir do IV (backdoor)
+                # 1) Recuperar K_enc a partir do blob (backdoor)
                 try:
-                    k_enc = aes_decrypt_ecb(K_SERVER, iv)
+                    k_enc = aes_decrypt_ecb(K_SERVER, blob)
                 except Exception:
-                    conn.sendall(b"ERR Falha ao recuperar K_enc a partir do IV\n")
+                    conn.sendall(b"ERR Falha ao recuperar K_enc a partir do blob\n")
                     continue
 
                 # 2) Derivar K_mac
                 k_mac = hashlib.sha256(k_enc).digest()
 
                 # 3) Verificar HMAC
-                calc_tag = hmac_sha256(k_mac, header + iv + cipher)
+                calc_tag = hmac_sha256(k_mac, header + blob + iv + cipher)
                 if not hmac.compare_digest(calc_tag, tag):
                     conn.sendall(b"ERR HMAC invalido (mensagem corrompida)\n")
                     continue
@@ -425,23 +426,25 @@ def handle_client(conn: socket.socket, addr):
                 # 5) Mostrar no servidor (backdoor)
                 print(f"[BACKDOOR] {current_username} -> {dest}: {plaintext_str}")
 
-                # 6) Opcional: alterar mensagem
+                # 6) Opcional: alterar mensagem (exemplo simples)
                 msg_mod = plaintext_str
-                # Exemplo simples: se começar por "!upper", o servidor altera para maiusculas
                 if msg_mod.startswith("!upper "):
-                    msg_mod = msg_mod[len("!upper "):].upper()
+                    msg_mod = msg_mod[len("!upper ") :].upper()
 
                 plaintext_out = msg_mod.encode("utf-8")
 
                 # 7) Recifrar / recalcular HMAC
                 cipher_out = aes_encrypt_cbc(k_enc, iv, plaintext_out)
-                tag_out = hmac_sha256(k_mac, header + iv + cipher_out)
+                tag_out = hmac_sha256(k_mac, header + blob + iv + cipher_out)
 
                 b64_cipher_out = base64.b64encode(cipher_out).decode("utf-8")
                 b64_tag_out = base64.b64encode(tag_out).decode("utf-8")
 
                 # 8) Enviar ao destinatario
-                wire = f"MSG_FROM {current_username} {b64_header} {b64_iv} {b64_cipher_out} {b64_tag_out}\n"
+                wire = (
+                    f"MSG_FROM {current_username} "
+                    f"{b64_header} {b64_blob} {b64_iv} {b64_cipher_out} {b64_tag_out}\n"
+                )
                 try:
                     dest_sock.sendall(wire.encode("utf-8"))
                 except Exception:
@@ -493,23 +496,24 @@ if __name__ == "__main__":
     main()
 """
 Terminal 1:
-$ python3 server.py
+$ python3 server.py 
 [INFO] Servidor a escutar em 127.0.0.1:5000
-[DEBUG] Ligacao de ('127.0.0.1', 38976)
-[DEBUG] Ligacao de ('127.0.0.1', 39666)
-[BACKDOOR] Alice -> Bob: mensagem assinada pela Alice||SIG||j6NKqZpXBXuHk6Wq4KA6u6wa3JVhJF8XOmXYWuzyGcKj8+3AVm3kQWmFstGWdfyzcF3RG6x3y+uXwDP/sET7Zw60ErFsp5eqg4OBU4NML1ItggAknMqnmjgfRYwwFDRL1lBaczCK1e4HGKcA+vxhLYF1T+fbh5EZUJulYx22brbyVMh3mX9RvaW/XqfHAffunCoMl/lVroQx5oU6iEFuf0/5YVQMXwBkmbG/NjcnyMIA+EQAhvbrLOJotxfJwm4Z53S7OgL79G6bM9rLCmHHes5ywwprUQX5EJY2OZz+jkkKRaFJUPQBRlq5K2GzvCYz/PMmn/eqbdd3sXPSDZIw6Q==
-[BACKDOOR] Alice -> Bob: outra mensagem assinada pela Alice||SIG||dF/I1twL29gNWf5qfKwPryLNx5Vf4xISe61cZ1DTnuYenBcbvg+lOZHEmkNZ2lljRBZZ7tQZmbpSPGp2WZBjrHImjCopG+X/DFe9lbI02r0eiXGDCl2BZh3jXxQQoaWrVZVZh3dO/2xoYHgqWT9eGnEJIWN85pqmciaatzxMDYEFuoRz9ENNlXSHBd6FIhvFUqRRrckJzZxwNZqtMxjM9lG4cEqsB7VqStBzob4V+sDSaR3CiTRfTCIQdU+XWDhJM6SIUSJHn/j1G2mII3zEHpOR82DLNg50z7mAXMdzmag+rxEqixJW2aSF/jM06pGfwKfmOnqdQ3RkAoycaAufvA==
-[DEBUG] Ligacao terminada com ('127.0.0.1', 38976)
-[DEBUG] Ligacao terminada com ('127.0.0.1', 39666)
+[DEBUG] Ligacao de ('127.0.0.1', 49860)
+[DEBUG] Ligacao de ('127.0.0.1', 55480)
+[BACKDOOR] Alice -> Bob: mensagem cifrada sem assinatura
+[BACKDOOR] Alice -> Bob: mensagem assinada pela Alice||SIG||fFdyNWRrkTJ9mHLgKsGIrB/mq2BCMsDkFAwwT03hLgrRN68W5jECGYT8m0nnxnaQPAVQU/Lg8SVmM0nTaoAU3li8QPSHaUoRMYCnqzEcYqa9FZ79LfFjGGz01TbaLA48baYKysO9jX6w1XRrkQ0si1761v/7e8D7x6FX62SSnkVSiSL8lkDbF44zPp4H20+X7h/eu7YFl0m4H6RgPGN8iMeXky4g5v8PEH6+DQtZcSQPvU2OYXmH4OPakxkeJCZKhIGbSwx21Gg/eK24WFD5CSe/PmQw605MOQHS3QJHlQQpC5c3LcTCqR/5CQcr911S8UKMS3hx7io5cFYpF43Xww==
+[BACKDOOR] Alice -> Bob: outra mensagem assinada pela Alice||SIG||UJVBCnorvmgsNgcZKXglWtEBhFiu50YVKOkLs56046TmrsVksJ+rNayL+B6fFACLZEh+V8+MB6Q0N79kTvI9aQZB9wO4Z8J/h8kwGQFea+9vk15V6LobdFLvk319/DRL1wSeVYCglxWUiT8L3xBey/gH5T9GpzMZPCVh1lOFGuYhqWFay9hGcwfSkDtfpoGnBLEdMxEyYN1THae4fiVoOvfzMECrkBL3TGNLIrAPEZRMt5V0cXKNNyPlKQj+sVPNGYmaZmJTDl4EidgQT9o+7grjO+bi3A12tb9ikYtrghgh9x4R9HEeRTFZYgXCHBT5coSiWRkREznP8sBqSLygOw==
+[BACKDOOR] Alice -> Bob: !upper esta mensagem vai ser modificada
+[DEBUG] Ligacao terminada com ('127.0.0.1', 49860)
+[DEBUG] Ligacao terminada com ('127.0.0.1', 55480)
 
 
 Terminal 2:
-$ python3 client.py
+$ python3 client.py 
 [INFO] A ligar ao servidor em 127.0.0.1:5000...
-OK Ligado ao ChatWithBackdoor v3. Use REGISTER ou LOGIN.
+OK Ligado ao ChatWithBackdoor v3.1. Use REGISTER ou LOGIN.
 Escolhe um username (identidade local): Alice
-[INFO] A gerar par de chaves RSA para 'Alice'...
-[INFO] Chaves guardadas em Alice_priv.pem e Alice_pub.pem
+[INFO] A usar chaves existentes: Alice_priv.pem, Alice_pub.pem
 Comandos (antes do LOGIN):
   /register  -> registar username + chave publica no servidor
   /login     -> autenticar com assinatura de nonce
@@ -518,14 +522,13 @@ Comandos (antes do LOGIN):
 > /register
 OK REGISTER
 > /login
-NONCE /nQMHDTKuTlASCidW8ih7lVNs/+DBLgosuAxz2UBPlg=
+NONCE bhcs3C+MAqCI+EA6RhmLIACA2UFjwBCHTqCVBCQ4QF4=
 OK LOGIN
 [SERVIDOR] Alice autenticou-se e entrou no chat.
 -----------------------------------------------------
 [INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.
 Comandos (chat + DH):
-  /to <dest> <mensagem>         -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
-  /send <dest> <mensagem>       -> alias para /to (envio cifrado)
+  /send <dest> <mensagem>       -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
   /send_signed <dest> <mensagem>-> enviar mensagem CIFRADA + ASSINADA digitalmente
   /list                         -> listar utilizadores online
   /getpk <user>                 -> pedir chave publica RSA de <user> (para verificar assinaturas)
@@ -534,37 +537,40 @@ Comandos (chat + DH):
   /quit                         -> sair
 -----------------------------------------------------
 > [SERVIDOR] Bob autenticou-se e entrou no chat.
-             
+
+> /list
+> USERS Alice, Bob
+
 > /dh_start Bob
 [DH] Iniciado DH com Bob. A aguardar DH_REPLY_FROM Bob...
 > [DH] Sessao DH com Bob COMPLETA (lado iniciador).
-[DH]   Z (primeiros 16 hex): fab4008874d0a30f5ba889df132dfbdd
-[DH]   K_enc (primeiros 16 hex): 6fb05593b7895f33868d36f81868746f
-[DH]   K_mac (primeiros 16 hex): 86a0ec5c5d67fb6f0bbd968194126cb8
+[DH]   Z (primeiros 16 hex): d1c34aa3f0925ac33c88bcf70c96b88d
+[DH]   K_enc (primeiros 16 hex): 86b4176ad61dfcc56b51a8a23b8c0af8
+[DH]   K_mac (primeiros 16 hex): 2277cf004aa6aaee30786b83d943580d
 
 > /dh_show
 [DH] Sessao com Bob:
-      Z     (16 hex): fab4008874d0a30f5ba889df132dfbdd
-      K_enc (16 hex): 6fb05593b7895f33868d36f81868746f
-      K_mac (16 hex): 86a0ec5c5d67fb6f0bbd968194126cb8
-> /getpk Bob
-> [INFO] Chave publica de Bob recebida e guardada (294 bytes DER).
-                                             
-> /send_signed Bob mensagem assinada pela Alice
+      Z     (16 hex): d1c34aa3f0925ac33c88bcf70c96b88d
+      K_enc (16 hex): 86b4176ad61dfcc56b51a8a23b8c0af8
+      K_mac (16 hex): 2277cf004aa6aaee30786b83d943580d
+> /send Bob mensagem cifrada sem assinatura
+[MSG] Mensagem cifrada enviada para Bob.
+> /send_signed Bob mensagem assinada pela Alice # o Bob ainda nao pediu a chave publica da Alice
 [MSG] Mensagem CIFRADA + ASSINADA enviada para Bob.
-> /send_signed Bob outra mensagem assinada pela Alice
+> /send_signed Bob outra mensagem assinada pela Alice # o Bob ja pediu a chave publica da Alice
 [MSG] Mensagem CIFRADA + ASSINADA enviada para Bob.
+> /send Bob !upper esta mensagem vai ser modificada # começa pela palavra !upper, e o server modifica
+[MSG] Mensagem cifrada enviada para Bob.
 > /quit
 [INFO] Cliente terminado.
 
 
 Terminal 3:
-$ python3 client.py
+$ python3 client.py 
 [INFO] A ligar ao servidor em 127.0.0.1:5000...
-OK Ligado ao ChatWithBackdoor v3. Use REGISTER ou LOGIN.
+OK Ligado ao ChatWithBackdoor v3.1. Use REGISTER ou LOGIN.
 Escolhe um username (identidade local): Bob
-[INFO] A gerar par de chaves RSA para 'Bob'...
-[INFO] Chaves guardadas em Bob_priv.pem e Bob_pub.pem
+[INFO] A usar chaves existentes: Bob_priv.pem, Bob_pub.pem
 Comandos (antes do LOGIN):
   /register  -> registar username + chave publica no servidor
   /login     -> autenticar com assinatura de nonce
@@ -573,13 +579,13 @@ Comandos (antes do LOGIN):
 > /register
 OK REGISTER
 > /login
-NONCE iLd3pVNLwCLB9HY6hBx+dqK0VLTmY1euv653Ei6ZbXc=
+NONCE cL91vtLOjjx6zoHkJ3/Nc1u4kQEP+G0W3Srnvfvyxe4=
 OK LOGIN
+[SERVIDOR] Bob autenticou-se e entrou no chat.
 -----------------------------------------------------
 [INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.
 Comandos (chat + DH):
-  /to <dest> <mensagem>         -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
-  /send <dest> <mensagem>       -> alias para /to (envio cifrado)
+  /send <dest> <mensagem>       -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
   /send_signed <dest> <mensagem>-> enviar mensagem CIFRADA + ASSINADA digitalmente
   /list                         -> listar utilizadores online
   /getpk <user>                 -> pedir chave publica RSA de <user> (para verificar assinaturas)
@@ -587,17 +593,24 @@ Comandos (chat + DH):
   /dh_show                      -> mostrar sessoes DH e chaves derivadas
   /quit                         -> sair
 -----------------------------------------------------
-[SERVIDOR] Bob autenticou-se e entrou no chat.
 > [DH] Recebido DH_INIT_FROM Alice. Sessao DH criada.
-[DH]   Z (primeiros 16 hex): fab4008874d0a30f5ba889df132dfbdd
-[DH]   K_enc (primeiros 16 hex): 6fb05593b7895f33868d36f81868746f
-[DH]   K_mac (primeiros 16 hex): 86a0ec5c5d67fb6f0bbd968194126cb8
+[DH]   Z (primeiros 16 hex): d1c34aa3f0925ac33c88bcf70c96b88d
+[DH]   K_enc (primeiros 16 hex): 86b4176ad61dfcc56b51a8a23b8c0af8
+[DH]   K_mac (primeiros 16 hex): 2277cf004aa6aaee30786b83d943580d
+
+> /dh_show
+[DH] Sessao com Alice:
+      Z     (16 hex): d1c34aa3f0925ac33c88bcf70c96b88d
+      K_enc (16 hex): 86b4176ad61dfcc56b51a8a23b8c0af8
+      K_mac (16 hex): 2277cf004aa6aaee30786b83d943580d
+> FROM Alice [cifrado+HMAC]: mensagem cifrada sem assinatura
 FROM Alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem assinada pela Alice
 [INFO] Usa /getpk Alice para poderes verificar assinaturas desse utilizador.
 
-> /getpk Alice
+> /getpk Alice # o Bob pede chave publica da Alice
 > [INFO] Chave publica de Alice recebida e guardada (294 bytes DER).
 FROM Alice [cifrado+HMAC+ASSIN_OK]: outra mensagem assinada pela Alice
+FROM Alice [cifrado+HMAC]: ESTA MENSAGEM VAI SER MODIFICADA
 [SERVIDOR] Alice saiu do chat.
 
 > /quit
