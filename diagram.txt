@@ -1,0 +1,257 @@
+======================================================
+1) /register   (cliente regista username + pk no servidor)
+======================================================
+
+CLIENTE (Alice)
+  ensure_keys_exist("Alice")
+  -> generate_rsa_keypair(...)   [se não existirem .pem]
+  -> register_and_wait_response(sock, "Alice")
+       - load_public_key_pem("Alice")
+       - serialization.load_pem_public_key(...)
+       - der_bytes = public_key.public_bytes(...)
+       - b64_pk = base64(der_bytes)
+       - envia: "REGISTER Alice b64_pk\n"  ------------->
+
+SERVIDOR
+  handle_client(...):
+    recebe: "REGISTER Alice b64_pk"
+    - der_bytes = base64^-1(b64_pk)
+    - pubkey = load_public_key_from_der(der_bytes)
+    - users["Alice"] = pubkey
+    - envia: "OK REGISTER\n"  <-------------------------
+
+CLIENTE
+  recebe "OK REGISTER"
+
+
+======================================================
+2) /login   (autenticação forte com nonce + assinatura)
+======================================================
+
+CLIENTE (Alice)
+/login
+  perform_login(sock, "Alice")
+    - envia: "LOGIN Alice\n" --------------------------->
+
+SERVIDOR
+  recebe "LOGIN Alice"
+    - nonce = os.urandom(32)
+    - pending_nonces[conn] = ("Alice", nonce)
+    - b64_nonce = base64(nonce)
+    - envia: "NONCE b64_nonce\n" <----------------------
+
+CLIENTE
+  recebe "NONCE ..."
+    - nonce = base64^-1(b64_nonce)
+    - private_key = load_private_key("Alice")
+    - signature = private_key.sign(nonce, RSA-PSS+SHA256)
+    - b64_sig = base64(signature)
+    - envia: "LOGIN_SIG Alice b64_sig\n" --------------->
+
+SERVIDOR
+  recebe "LOGIN_SIG Alice b64_sig"
+    - signature = base64^-1(b64_sig)
+    - (username_pend, nonce) = pending_nonces[conn]
+    - pubkey = users["Alice"]
+    - verify_signature(pubkey, nonce, signature)
+    - se OK:
+        authenticated = True
+        current_username = "Alice"
+        online_clients["Alice"] = conn
+        envia: "OK LOGIN\n" <----------------------------
+
+CLIENTE
+  recebe "OK LOGIN"
+
+
+======================================================
+3) /dh_start   (X25519 para derivar K_enc, K_mac)
+======================================================
+
+CLIENTE A (Alice)
+/dh_start Bob
+  start_dh_with_peer(sock, "Bob")
+    - priv_A = X25519PrivateKey.generate()
+    - pub_A_bytes = priv_A.public_key().public_bytes(...)
+    - b64_pub_A = base64(pub_A_bytes)
+    - dh_sessions["Bob"] = { "dh_priv": priv_A, ... }
+    - envia: "DH_INIT Bob b64_pub_A\n" ----------------->
+
+SERVIDOR
+  recebe "DH_INIT Bob b64_pub_A"
+    - dest_sock = online_clients["Bob"]
+    - envia a Bob: "DH_INIT_FROM Alice b64_pub_A\n" <---
+
+CLIENTE B (Bob)
+  handle_server_line("DH_INIT_FROM Alice ...")
+    - peer_pub_A = base64^-1(b64_pub_A)
+    - priv_B = X25519PrivateKey.generate()
+    - shared_B = priv_B.exchange(peer_pub_A)
+    - (k_enc_B, k_mac_B) = derive_session_keys(shared_B)
+    - dh_sessions["Alice"] = {..., "k_enc": k_enc_B, "k_mac": k_mac_B}
+    - pub_B_bytes = priv_B.public_key().public_bytes(...)
+    - b64_pub_B = base64(pub_B_bytes)
+    - retorna ("SEND_DH_REPLY", "Alice", b64_pub_B)
+
+receiver_loop (Bob)
+  envia: "DH_REPLY Alice b64_pub_B\n" ------------------>
+
+SERVIDOR
+  recebe "DH_REPLY Alice b64_pub_B"
+    - dest_sock = online_clients["Alice"]
+    - envia a Alice: "DH_REPLY_FROM Bob b64_pub_B\n" <--
+
+CLIENTE A (Alice)
+  handle_server_line("DH_REPLY_FROM Bob ...")
+    - peer_pub_B = base64^-1(b64_pub_B)
+    - shared_A = priv_A.exchange(peer_pub_B)
+    - (k_enc_A, k_mac_A) = derive_session_keys(shared_A)
+    - dh_sessions["Bob"]["k_enc"] = k_enc_A
+    - dh_sessions["Bob"]["k_mac"] = k_mac_A
+
+
+======================================================
+4) /to   (mensagem em claro, sem cifragem)
+======================================================
+
+CLIENTE A (Alice)
+/to Bob msg
+  send_plaintext_message(sock, "Bob", "msg"):
+    - envia: "TO Bob msg\n" ---------------------------->
+
+SERVIDOR
+  recebe "TO Bob msg"
+    - dest_sock = online_clients["Bob"]
+    - envia: "FROM Alice: msg\n" <----------------------
+
+CLIENTE B (Bob)
+  imprime: "FROM Alice: msg"
+
+
+======================================================
+5) /send   (cifrado + HMAC + backdoor com blob)
+======================================================
+
+CLIENTE A (Alice)
+/send Bob "texto"
+  send_secure_message(sock, "Alice", "Bob", msg_str)
+    - st = dh_sessions["Bob"]
+      k_enc = st["k_enc"], k_mac = st["k_mac"]
+    - msg_bytes = msg_str.encode()
+    - build_cipher_packet("Alice","Bob",k_enc,k_mac,msg_bytes):
+        header = b"Alice->Bob"
+        blob   = aes_encrypt_ecb(K_SERVER, k_enc)
+        iv     = blob[:16]
+        cipher = aes_encrypt_cbc(k_enc, iv, msg_bytes)
+        tag    = hmac_sha256(k_mac, header + blob + iv + cipher)
+        -> b64_header, b64_blob, b64_iv, b64_cipher, b64_tag
+    - envia:
+      "MSG Bob b64_header b64_blob b64_iv b64_cipher b64_tag\n" ->
+
+SERVIDOR
+  recebe "MSG Bob ..."
+    - decode: header, blob, iv, cipher, tag
+    - k_enc = aes_decrypt_ecb(K_SERVER, blob)     # BACKDOOR
+    - k_mac = SHA256(k_enc)
+    - verifica HMAC(header+blob+iv+cipher)
+    - plaintext = aes_decrypt_cbc(k_enc, iv, cipher)
+    - plaintext_str = plaintext.decode()
+    - [opcional] se começa com "!upper ":
+          msg_mod = restante.upper()
+      senão:
+          msg_mod = plaintext_str
+    - recifra msg_mod com AES-CBC(k_enc, iv)
+    - recalcula tag_out = HMAC(k_mac, header + blob + iv + cipher_out)
+    - envia:
+      "MSG_FROM Alice b64_header b64_blob b64_iv b64_cipher_out b64_tag_out\n"
+      <---------------------------------------------------------------
+
+CLIENTE B (Bob)
+  handle_server_line("MSG_FROM ...")
+    - decode: header, blob, iv, cipher, tag
+    - usa k_enc,k_mac de dh_sessions["Alice"]
+    - verifica HMAC
+    - plaintext = aes_decrypt_cbc(k_enc, iv, cipher)
+    - text = plaintext.decode()
+    - se não tiver "||SIG||":
+        imprime "FROM Alice [cifrado+HMAC]: text"
+
+
+======================================================
+6) /send_signed   (cifrado + HMAC + assinatura digital)
+======================================================
+
+CLIENTE A (Alice)
+/send_signed Bob "texto"
+  send_signed_message(sock, "Alice", "Bob", msg_str)
+    - st = dh_sessions["Bob"]  -> k_enc, k_mac
+    - msg_bytes = msg_str.encode()
+    - priv = load_private_key("Alice")
+    - signature = priv.sign(msg_bytes, RSA-PSS+SHA256)
+    - b64_sig = base64(signature)
+    - plaintext = (msg_str + "||SIG||" + b64_sig).encode()
+    - build_cipher_packet(...)  (igual ao /send)
+    - envia "MSG Bob b64_header b64_blob b64_iv b64_cipher b64_tag\n" --->
+
+SERVIDOR
+  trata igual a /send (backdoor, possível !upper, etc)
+  e envia "MSG_FROM Alice ...\n" ----------------------->
+
+CLIENTE B (Bob)
+  handle_server_line("MSG_FROM ...")
+    - verifica HMAC, decifra AES-CBC
+    - text = plaintext.decode()
+    - se contém "||SIG||":
+         (msg_part, sig_b64) = text.rsplit("||SIG||",1)
+         sig_bytes = base64^-1(sig_b64)
+         der = peer_pubkeys.get("Alice")
+
+         se 'der' é None:
+            imprime:
+             "FROM Alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: msg_part"
+            sugere "/getpk Alice"
+         senão:
+            pubkey = load_der_public_key(der)
+            pubkey.verify(sig_bytes, msg_bytes, RSA-PSS+SHA256)
+            se OK:
+               "FROM Alice [cifrado+HMAC+ASSIN_OK]: msg_part"
+            senão:
+               "FROM Alice [cifrado+HMAC+ASSIN_FAIL]: msg_part"
+
+
+======================================================
+7) /getpk   (cliente vai buscar pk de outro user ao servidor)
+======================================================
+
+CLIENTE (Bob)
+/getpk Alice
+  envia: "GET_PK Alice\n" ------------------------------->
+
+SERVIDOR
+  recebe "GET_PK Alice"
+    - pk_obj = users["Alice"]
+    - der_bytes = pk_obj.public_bytes(...)
+    - b64_pk = base64(der_bytes)
+    - envia: "PK Alice b64_pk\n" <-----------------------
+
+CLIENTE
+  handle_server_line("PK Alice ...")
+    - der = base64^-1(b64_pk)
+    - peer_pubkeys["Alice"] = der
+    - imprime "[INFO] Chave publica de Alice recebida..."
+
+
+======================================================
+8) /quit   (fechar sessão)
+======================================================
+
+CLIENTE
+  /quit
+    - envia: "QUIT\n" ----------------------------------->
+
+SERVIDOR
+  recebe "QUIT"
+    - envia: "OK Adeus\n"
+    - remove current_username de online_clients
+    - broadcast_system_message("Alice saiu do chat.")
+    - fecha conn
