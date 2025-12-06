@@ -1,23 +1,10 @@
-# ===============================================================
-# CHATWITHBACKDOOR - CLIENTE (CIFRA + HMAC + BACKDOOR+BLOB + ASSINATURA)
-# ===============================================================
-#   - Implementa o backdoor com "blob" alinhado com o diagrama:
-#       blob   = AES-ECB_Encrypt(K_SERVER, K_enc)
-#       IV     = primeiros 16 bytes de blob (na prática blob inteiro)
-#       tag    = HMAC(K_mac, header || blob || IV || C)
-#   - Protocolo MSG e MSG_FROM passam a incluir blob:
-#       MSG dest b64_header b64_blob b64_iv b64_cipher b64_tag
-#
-#   Funcionalidades já presentes:
-#     - Par de chaves RSA local por utilizador
-#     - REGISTER: manda username + chave publica para o servidor
-#     - LOGIN com assinatura de nonce (RSA-PSS)
-#     - DH efémero (X25519) entre clientes
-#     - K_enc, K_mac derivadas do segredo DH
-#     - Mensagens cifradas AES-CBC + HMAC-SHA256
-#     - Backdoor no servidor (blob)
-#     - /send_signed => mensagem cifrada + assinatura digital embedada
-# ===============================================================
+"""
+ChatWithBackdoor - Cliente
+==========================
+Sistema de chat com cifragem AES-CBC, autenticação HMAC e backdoor no servidor.
+Funcionalidades: registo RSA, autenticação com assinatura digital, DH efémero (X25519),
+mensagens cifradas com backdoor embedado via 'blob', e assinatura digital opcional.
+"""
 
 import socket
 import threading
@@ -35,26 +22,41 @@ from cryptography.hazmat.primitives import padding as sympadding
 HOST = "127.0.0.1"
 PORT = 5000
 
-# Tem de ser igual ao do servidor para a backdoor funcionar.
-K_SERVER = b"0123456789abcdef"  # 16 bytes
+# Chave do servidor (deve ser igual no servidor e cliente para backdoor funcionar)
+K_SERVER = b"0123456789abcdef"
 
 
-# ---------------------------------------------------------------
-# AUXILIARES CRIPTO
-# ---------------------------------------------------------------
 def aes_encrypt_ecb(key: bytes, block: bytes) -> bytes:
+    """
+    Cifra um bloco com AES-ECB.
+    
+    Input: key (16 bytes), block (16 bytes)
+    Output: ciphertext (16 bytes)
+    """
     cipher = Cipher(algorithms.AES(key), modes.ECB())
     enc = cipher.encryptor()
     return enc.update(block) + enc.finalize()
 
 
 def aes_decrypt_ecb(key: bytes, block: bytes) -> bytes:
+    """
+    Decifra um bloco com AES-ECB.
+    
+    Input: key (16 bytes), block (16 bytes)
+    Output: plaintext (16 bytes)
+    """
     cipher = Cipher(algorithms.AES(key), modes.ECB())
     dec = cipher.decryptor()
     return dec.update(block) + dec.finalize()
 
 
 def aes_encrypt_cbc(key: bytes, iv: bytes, plaintext: bytes) -> bytes:
+    """
+    Cifra dados com AES-CBC e padding PKCS7.
+    
+    Input: key (16 bytes), iv (16 bytes), plaintext (bytes)
+    Output: ciphertext (bytes, múltiplo de 16)
+    """
     padder = sympadding.PKCS7(128).padder()
     padded = padder.update(plaintext) + padder.finalize()
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
@@ -63,6 +65,12 @@ def aes_encrypt_cbc(key: bytes, iv: bytes, plaintext: bytes) -> bytes:
 
 
 def aes_decrypt_cbc(key: bytes, iv: bytes, ciphertext: bytes) -> bytes:
+    """
+    Decifra dados com AES-CBC e remove padding PKCS7.
+    
+    Input: key (16 bytes), iv (16 bytes), ciphertext (bytes)
+    Output: plaintext (bytes)
+    """
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
     dec = cipher.decryptor()
     padded = dec.update(ciphertext) + dec.finalize()
@@ -71,19 +79,34 @@ def aes_decrypt_cbc(key: bytes, iv: bytes, ciphertext: bytes) -> bytes:
 
 
 def hmac_sha256(key: bytes, data: bytes) -> bytes:
+    """
+    Calcula HMAC-SHA256.
+    
+    Input: key (bytes), data (bytes)
+    Output: tag (32 bytes)
+    """
     return hmac.new(key, data, hashlib.sha256).digest()
 
 
-# ---------------------------------------------------------------
-# GESTAO DE CHAVES RSA NO CLIENTE
-# ---------------------------------------------------------------
 def get_key_filenames(username: str):
+    """
+    Retorna o nome dos ficheiros de chaves RSA para um utilizador.
+    
+    Input: username (str)
+    Output: (priv_file, pub_file) (tuple of str)
+    """
     priv_file = f"{username}_priv.pem"
     pub_file = f"{username}_pub.pem"
     return priv_file, pub_file
 
 
 def generate_rsa_keypair(username: str):
+    """
+    Gera par de chaves RSA (2048 bits) e guarda em ficheiros PEM.
+    
+    Input: username (str)
+    Output: None (ficheiros criados: <username>_priv.pem, <username>_pub.pem)
+    """
     priv_file, pub_file = get_key_filenames(username)
 
     print(f"[INFO] A gerar par de chaves RSA para '{username}'...")
@@ -114,18 +137,36 @@ def generate_rsa_keypair(username: str):
 
 
 def load_private_key(username: str):
+    """
+    Carrega a chave privada RSA do ficheiro PEM.
+    
+    Input: username (str)
+    Output: RSAPrivateKey object
+    """
     priv_file, _ = get_key_filenames(username)
     with open(priv_file, "rb") as f:
         return serialization.load_pem_private_key(f.read(), password=None)
 
 
 def load_public_key_pem(username: str) -> bytes:
+    """
+    Carrega chave pública RSA em formato PEM.
+    
+    Input: username (str)
+    Output: PEM bytes
+    """
     _, pub_file = get_key_filenames(username)
     with open(pub_file, "rb") as f:
         return f.read()
 
 
 def ensure_keys_exist(username: str):
+    """
+    Verifica se chaves RSA existem; se não, gera-as.
+    
+    Input: username (str)
+    Output: None
+    """
     priv_file, pub_file = get_key_filenames(username)
     if not (os.path.exists(priv_file) and os.path.exists(pub_file)):
         generate_rsa_keypair(username)
@@ -133,29 +174,26 @@ def ensure_keys_exist(username: str):
         print(f"[INFO] A usar chaves existentes: {priv_file}, {pub_file}")
 
 
-# ---------------------------------------------------------------
-# ESTADO DH / CHAVES DE SESSAO
-# ---------------------------------------------------------------
-# peer -> {
-#   "dh_priv": X25519PrivateKey,
-#   "shared": bytes or None,
-#   "k_enc": bytes or None,
-#   "k_mac": bytes or None,
-# }
+# Sessões DH: peer -> {dh_priv, shared, k_enc, k_mac}
 dh_sessions = {}
 dh_lock = threading.Lock()
 
-# Tabela de chaves públicas de outros utilizadores (RSA, DER)
+# Chaves públicas RSA de outros utilizadores: username -> DER bytes
 peer_pubkeys = {}
 peer_pk_lock = threading.Lock()
 
 
 def derive_session_keys(shared: bytes):
     """
-    Dado Z (segredo partilhado do DH), deriva:
-      full  = SHA256("enc" || Z)
-      K_enc = full[:16]  (AES-128)
-      K_mac = SHA256(K_enc)
+    Deriva chaves de sessão a partir do segredo DH.
+    
+    Input: shared (32 bytes - segredo X25519)
+    Output: (k_enc, k_mac) - (16 bytes, 32 bytes)
+    
+    Processo:
+      full = SHA256("enc" || shared)
+      k_enc = full[:16]  (AES-128)
+      k_mac = SHA256(k_enc)
     """
     full = hashlib.sha256(b"enc" + shared).digest()
     k_enc = full[:16]
@@ -163,18 +201,25 @@ def derive_session_keys(shared: bytes):
     return k_enc, k_mac
 
 
-# ---------------------------------------------------------------
-# THREAD DE RECECAO (CHAT + PK + DH + MSG)
-# ---------------------------------------------------------------
 def handle_server_line(line: str):
     """
-    Processa uma unica linha vinda do servidor.
+    Processa uma linha recebida do servidor.
+    
+    Input: line (str) - linha do protocolo
+    Output: None ou tuple para acções adicionais
+    
+    Tipos de mensagens processadas:
+      - MSG_FROM: mensagem cifrada de outro utilizador
+      - PK: chave pública RSA de utilizador
+      - DH_INIT_FROM: pedido DH de outro utilizador
+      - DH_REPLY_FROM: resposta DH de outro utilizador
+      - Outras: mensagens de sistema/chat
     """
     line = line.strip()
     if not line:
         return
 
-    # MSG_FROM orig b64_header b64_blob b64_iv b64_cipher b64_tag
+    # Mensagem cifrada: MSG_FROM orig b64_header b64_blob b64_iv b64_cipher b64_tag
     if line.startswith("MSG_FROM "):
         parts = line.split(" ", 6)
         if len(parts) < 7:
@@ -202,11 +247,13 @@ def handle_server_line(line: str):
         k_enc = st["k_enc"]
         k_mac = st["k_mac"]
 
+        # Verificar HMAC
         calc_tag = hmac_sha256(k_mac, header + blob + iv + cipher)
         if not hmac.compare_digest(calc_tag, tag):
             print(f"[MSG] HMAC invalido para mensagem de {orig} (mensagem corrompida/alterada).")
             return
 
+        # Decifrar mensagem
         try:
             plaintext = aes_decrypt_cbc(k_enc, iv, cipher)
         except Exception:
@@ -218,7 +265,7 @@ def handle_server_line(line: str):
         except Exception:
             text = plaintext.decode("utf-8", errors="replace")
 
-        # --- Verificar se vem com assinatura digital ---
+        # Verificar se tem assinatura digital embedada
         if "||SIG||" in text:
             try:
                 msg_part, sig_b64 = text.rsplit("||SIG||", 1)
@@ -247,6 +294,7 @@ def handle_server_line(line: str):
                 print(f"FROM {orig} [cifrado+HMAC][PK INVALIDA LOCAL]: {msg_part}")
                 return
 
+            # Verificar assinatura RSA-PSS
             try:
                 pubkey.verify(
                     sig_bytes,
@@ -262,11 +310,10 @@ def handle_server_line(line: str):
                 print(f"FROM {orig} [cifrado+HMAC+ASSIN_FAIL]: {msg_part}")
             return
 
-        # Mensagem normal (sem assinatura embedada)
         print(f"FROM {orig} [cifrado+HMAC]: {text}")
         return
 
-    # PK <username> <b64_der>
+    # Chave pública RSA: PK <username> <b64_der>
     if line.startswith("PK "):
         parts = line.split(" ", 2)
         if len(parts) < 3:
@@ -283,7 +330,7 @@ def handle_server_line(line: str):
         print(f"[INFO] Chave publica de {user} recebida e guardada ({len(der)} bytes DER).")
         return
 
-    # DH_INIT_FROM <orig> <b64_dh_pub>
+    # Pedido DH de outro utilizador: DH_INIT_FROM <orig> <b64_dh_pub>
     if line.startswith("DH_INIT_FROM "):
         parts = line.split(" ", 2)
         if len(parts) < 3:
@@ -302,6 +349,7 @@ def handle_server_line(line: str):
             print(f"[DH] Public key DH_INIT_FROM de {orig} invalida.")
             return
 
+        # Gerar par DH local e calcular segredo partilhado
         priv = x25519.X25519PrivateKey.generate()
         shared = priv.exchange(peer_pub_key)
         k_enc, k_mac = derive_session_keys(shared)
@@ -326,7 +374,7 @@ def handle_server_line(line: str):
         print(f"[DH]   K_mac (primeiros 16 hex): {k_mac.hex()[:32]}")
         return ("SEND_DH_REPLY", orig, b64_my_pub)
 
-    # DH_REPLY_FROM <orig> <b64_dh_pub>
+    # Resposta DH: DH_REPLY_FROM <orig> <b64_dh_pub>
     if line.startswith("DH_REPLY_FROM "):
         parts = line.split(" ", 2)
         if len(parts) < 3:
@@ -352,6 +400,7 @@ def handle_server_line(line: str):
             print(f"[DH] Recebido DH_REPLY_FROM {orig}, mas nao ha DH_INIT em curso.")
             return
 
+        # Completar DH do lado iniciador
         priv = state["dh_priv"]
         shared = priv.exchange(peer_pub_key)
         k_enc, k_mac = derive_session_keys(shared)
@@ -372,6 +421,14 @@ def handle_server_line(line: str):
 
 
 def receiver_loop(sock: socket.socket):
+    """
+    Thread que recebe e processa mensagens do servidor continuamente.
+    
+    Input: sock (socket conectado)
+    Output: None
+    
+    Processa linha a linha chamando o handle_server_line().
+    """
     try:
         buffer = ""
         while True:
@@ -384,6 +441,7 @@ def receiver_loop(sock: socket.socket):
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
                 res = handle_server_line(line)
+                # Se for DH_REPLY, enviar automaticamente
                 if isinstance(res, tuple) and res and res[0] == "SEND_DH_REPLY":
                     _, dest, b64_my_pub = res
                     wire = f"DH_REPLY {dest} {b64_my_pub}\n"
@@ -401,10 +459,15 @@ def receiver_loop(sock: socket.socket):
             pass
 
 
-# ---------------------------------------------------------------
-# REGISTER / LOGIN (SINCRONOS)
-# ---------------------------------------------------------------
 def register_and_wait_response(sock: socket.socket, username: str):
+    """
+    Envia REGISTER e espera pela resposta síncrona.
+    
+    Input: sock (socket), username (str)
+    Output: bool (True se sucesso)
+    
+    Envia chave pública RSA em DER base64.
+    """
     pub_pem = load_public_key_pem(username)
 
     public_key = serialization.load_pem_public_key(pub_pem)
@@ -428,6 +491,19 @@ def register_and_wait_response(sock: socket.socket, username: str):
 
 
 def perform_login(sock: socket.socket, username: str):
+    """
+    Executa autenticação com assinatura digital de nonce. (!! AINDA NAO È ZERO KNOWLEDGE!!)
+    
+    Input: sock (socket), username (str)
+    Output: bool (True se autenticado)
+    
+    Protocolo:
+      1. Enviar LOGIN <username>
+      2. Receber NONCE <b64>
+      3. Assinar nonce com RSA-PSS
+      4. Enviar LOGIN_SIG <username> <b64_sig>
+      5. Receber OK LOGIN ou erro
+    """
     sock.sendall(f"LOGIN {username}\n".encode("utf-8"))
 
     data = sock.recv(4096)
@@ -449,6 +525,7 @@ def perform_login(sock: socket.socket, username: str):
         print("[ERRO] NONCE recebido nao e base64 valido.")
         return False
 
+    # Assinar nonce com chave privada RSA
     private_key = load_private_key(username)
     signature = private_key.sign(
         nonce,
@@ -475,10 +552,15 @@ def perform_login(sock: socket.socket, username: str):
     return False
 
 
-# ---------------------------------------------------------------
-# COMANDOS DH DO UTILIZADOR
-# ---------------------------------------------------------------
 def start_dh_with_peer(sock: socket.socket, peer: str):
+    """
+    Inicia troca DH com outro utilizador.
+    
+    Input: sock (socket), peer (str - username destino)
+    Output: None
+    
+    Gera par X25519 efémero e envia chave pública.
+    """
     priv = x25519.X25519PrivateKey.generate()
     pub = priv.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
@@ -503,6 +585,12 @@ def start_dh_with_peer(sock: socket.socket, peer: str):
 
 
 def show_dh_sessions():
+    """
+    Mostra todas as sessões DH estabelecidas e suas chaves.
+    
+    Input: None
+    Output: None (imprime no terminal)
+    """
     with dh_lock:
         if not dh_sessions:
             print("[DH] Nao ha sessoes DH guardadas.")
@@ -523,16 +611,27 @@ def show_dh_sessions():
                 print(f"      K_mac (16 hex): {st['k_mac'].hex()[:32]}")
 
 
-# ---------------------------------------------------------------
-# ENVIO SEGURO (CIFRA + HMAC + BACKDOOR COM BLOB)
-# ---------------------------------------------------------------
 def build_cipher_packet(my_username: str, dest: str, k_enc: bytes, k_mac: bytes, msg_bytes: bytes):
     """
-    Constrói (b64_header, b64_blob, b64_iv, b64_cipher, b64_tag) prontos para enviar em MSG.
+    Constrói pacote cifrado com backdoor.
+    
+    Input:
+      - my_username (str): remetente
+      - dest (str): destinatário
+      - k_enc (16 bytes): chave de cifra
+      - k_mac (32 bytes): chave HMAC
+      - msg_bytes (bytes): mensagem a cifrar
+    
+    Output: (b64_header, b64_blob, b64_iv, b64_cipher, b64_tag)
+    
+    Backdoor:
+      blob = AES-ECB(K_SERVER, k_enc)
+      IV = primeiros 16 bytes de blob
+      tag = HMAC(k_mac, header || blob || IV || C)
     """
     header = f"{my_username}->{dest}".encode("utf-8")
 
-    # Backdoor: blob = AES-ECB(K_SERVER, K_enc), IV = primeiros 16 bytes de blob
+    # Backdoor: servidor consegue recuperar k_enc a partir de blob
     blob = aes_encrypt_ecb(K_SERVER, k_enc)
     iv = blob[:16]
 
@@ -546,10 +645,13 @@ def build_cipher_packet(my_username: str, dest: str, k_enc: bytes, k_mac: bytes,
     b64_tag = base64.b64encode(tag).decode("utf-8")
     return b64_header, b64_blob, b64_iv, b64_cipher, b64_tag
 
+
 def send_plaintext_message(sock: socket.socket, dest: str, msg_str: str):
     """
-    Mensagem SEM cifragem, SEM HMAC e SEM assinatura.
-    Apenas texto em claro (inseguro).
+    Envia mensagem em texto limpo (INSEGURO - apenas para debug).
+    
+    Input: sock (socket), dest (str), msg_str (str)
+    Output: None
     """
     wire = f"TO {dest} {msg_str}\n"
     try:
@@ -558,9 +660,15 @@ def send_plaintext_message(sock: socket.socket, dest: str, msg_str: str):
     except Exception as e:
         print(f"[ERRO] Nao foi possivel enviar TO: {e}")
 
+
 def send_secure_message(sock: socket.socket, my_username: str, dest: str, msg_str: str):
     """
-    Mensagem cifrada + HMAC, SEM assinatura digital embedada.
+    Envia mensagem cifrada com AES-CBC + HMAC (sem assinatura digital).
+    
+    Input: sock (socket), my_username (str), dest (str), msg_str (str)
+    Output: None
+    
+    Requer sessão DH estabelecida com dest.
     """
     with dh_lock:
         st = dh_sessions.get(dest)
@@ -587,8 +695,15 @@ def send_secure_message(sock: socket.socket, my_username: str, dest: str, msg_st
 
 def send_signed_message(sock: socket.socket, my_username: str, dest: str, msg_str: str):
     """
-    Mensagem cifrada + HMAC + ASSINATURA DIGITAL (RSA-PSS):
-      plaintext = msg || "||SIG||" || base64(signature)
+    Envia mensagem cifrada + HMAC + assinatura digital RSA-PSS.
+    
+    Input: sock (socket), my_username (str), dest (str), msg_str (str)
+    Output: None
+    
+    Formato da mensagem cifrada:
+      plaintext = msg || "SIG" || base64(RSA_signature)
+    
+    Assinatura calculada sobre msg original (antes de cifrar).
     """
     with dh_lock:
         st = dh_sessions.get(dest)
@@ -603,6 +718,7 @@ def send_signed_message(sock: socket.socket, my_username: str, dest: str, msg_st
     msg_bytes = msg_str.encode("utf-8")
     priv = load_private_key(my_username)
 
+    # Assinar mensagem original
     signature = priv.sign(
         msg_bytes,
         padding.PSS(
@@ -613,7 +729,7 @@ def send_signed_message(sock: socket.socket, my_username: str, dest: str, msg_st
     )
     b64_sig = base64.b64encode(signature).decode("utf-8")
 
-    # Nota: evitar "||SIG||" literalmente no texto da mensagem.
+    # Embedar assinatura na mensagem
     plaintext = (msg_str + "||SIG||" + b64_sig).encode("utf-8")
 
     b64_header, b64_blob, b64_iv, b64_cipher, b64_tag = build_cipher_packet(
@@ -628,10 +744,15 @@ def send_signed_message(sock: socket.socket, my_username: str, dest: str, msg_st
         print(f"[ERRO] Nao foi possivel enviar MSG assinada: {e}")
 
 
-# ---------------------------------------------------------------
-# MAIN CLIENT
-# ---------------------------------------------------------------
 def main():
+    """
+    Função principal do cliente.
+    
+      1. Conecta ao servidor
+      2. Faz o registo ou login
+      3. Loop principal do chat com comandos (/send, /dh_start, etc.)
+    """
+    #Fase 1 : Conectar
     print(f"[INFO] A ligar ao servidor em {HOST}:{PORT}...")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -652,7 +773,7 @@ def main():
 
     ensure_keys_exist(username)
 
-    # FASE 1: REGISTO / LOGIN
+    # Fase 2: REGISTRO / LOGIN
     authenticated = False
 
     print("Comandos (antes do LOGIN):")
@@ -697,7 +818,7 @@ def main():
 
         print("Comandos validos nesta fase: /register, /login, /quit")
 
-    # FASE 2: CHAT + DH + MSG
+    # Fase 3: CHAT + DH + MSG
     print("-----------------------------------------------------")
     print("[INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.")
     print("Comandos (chat + DH):")
@@ -711,6 +832,7 @@ def main():
     print("  /quit                         -> sair")
     print("-----------------------------------------------------")
 
+    # Iniciar thread de receção
     t = threading.Thread(target=receiver_loop, args=(sock,), daemon=True)
     t.start()
 
@@ -741,7 +863,6 @@ def main():
                 send_plaintext_message(sock, dest, msg)
                 continue
 
-            # /send -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
             if line.startswith("/send "):
                 parts = line.split(" ", 2)
                 if len(parts) < 3:
@@ -751,7 +872,6 @@ def main():
                 send_secure_message(sock, username, dest, msg)
                 continue
 
-            # /send_signed -> cifrado + assinatura digital
             if line.startswith("/send_signed "):
                 parts = line.split(" ", 2)
                 if len(parts) < 3:
