@@ -889,7 +889,7 @@ def handle_client(conn: socket.socket, addr):
                 try:
                     dest_sock.sendall(out)
                 except Exception:
-                    conn.sendall(b"ERR Falha ao enviar para {dest}\n".encode("utf-8"))
+                    conn.sendall(f"ERR Falha ao enviar para {dest}\n".encode("utf-8"))
                 continue
 
             # ---------------------------------------------------
@@ -1172,4 +1172,5 @@ FROM Alice [cifrado+HMAC+ASSIN_FAIL]: MENSAGEM ASSINADA E MODIFICADA PELO SERVID
 > /quit
 [INFO] Cliente terminado.
 """
+
 
