@@ -1044,133 +1044,158 @@ if __name__ == "__main__":
 
 """
 Terminal 1:
-$ python3 server.py 
+$ python3 server.py
 [INFO] Servidor a escutar em 127.0.0.1:5000
-[DEBUG] Ligacao de ('127.0.0.1', 49860)
-[DEBUG] Ligacao de ('127.0.0.1', 55480)
-[BACKDOOR] Alice -> Bob: mensagem cifrada sem assinatura
-[BACKDOOR] Alice -> Bob: mensagem assinada pela Alice||SIG||fFdyNWRrkTJ9mHLgKsGIrB/mq2BCMsDkFAwwT03hLgrRN68W5jECGYT8m0nnxnaQPAVQU/Lg8SVmM0nTaoAU3li8QPSHaUoRMYCnqzEcYqa9FZ79LfFjGGz01TbaLA48baYKysO9jX6w1XRrkQ0si1761v/7e8D7x6FX62SSnkVSiSL8lkDbF44zPp4H20+X7h/eu7YFl0m4H6RgPGN8iMeXky4g5v8PEH6+DQtZcSQPvU2OYXmH4OPakxkeJCZKhIGbSwx21Gg/eK24WFD5CSe/PmQw605MOQHS3QJHlQQpC5c3LcTCqR/5CQcr911S8UKMS3hx7io5cFYpF43Xww==
-[BACKDOOR] Alice -> Bob: outra mensagem assinada pela Alice||SIG||UJVBCnorvmgsNgcZKXglWtEBhFiu50YVKOkLs56046TmrsVksJ+rNayL+B6fFACLZEh+V8+MB6Q0N79kTvI9aQZB9wO4Z8J/h8kwGQFea+9vk15V6LobdFLvk319/DRL1wSeVYCglxWUiT8L3xBey/gH5T9GpzMZPCVh1lOFGuYhqWFay9hGcwfSkDtfpoGnBLEdMxEyYN1THae4fiVoOvfzMECrkBL3TGNLIrAPEZRMt5V0cXKNNyPlKQj+sVPNGYmaZmJTDl4EidgQT9o+7grjO+bi3A12tb9ikYtrghgh9x4R9HEeRTFZYgXCHBT5coSiWRkREznP8sBqSLygOw==
-[BACKDOOR] Alice -> Bob: !upper esta mensagem vai ser modificada
-[DEBUG] Ligacao terminada com ('127.0.0.1', 49860)
-[DEBUG] Ligacao terminada com ('127.0.0.1', 55480)
+[DEBUG] Ligacao de ('127.0.0.1', 36178)
+[DEBUG] Ligacao de ('127.0.0.1', 58006)
+[BACKDOOR] alice -> bob: mensagem cifrada enviada depois de dh
+[BACKDOOR] alice -> bob: !upper mensagem cifrada enviada depois de dh mas vai ser alterada
+[BACKDOOR] alice -> bob: mensagem enviada cifrada e com assinatura||SIG||JU6uT8xV5dnpJptextPDg3HcYhWJVgTOnQf7JAt39L7M1SlXoFl3JDP2tAgCNZ+jexmsAwUFWY18BDlAGGS1jfFjZ3GGnVYSW4WAj4H8HZ2VtV7JRu+Z7smHrv/vdnh41syuUz24SRCMOkgnStfgDwNM62eP56Pu8FhSi0FZTbQkq0fjW3xuLa+8YThbRsJoaopxD8qLiXliNn7/e6jVAXPbyRSxNs7zBMCbcIBX/Ft23C7lmM56BxO7pFivugSvSAryh7dFcfEDiG2/fC+w1KgkAlzZ6zNQdRppYqi4FBxy0BCz7oz5/hMFnVVUX5msqaVFHh/WESmYTzNGafChdQ==
+[BACKDOOR] alice -> bob: mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice||SIG||n9Q4DneEf+pWJuNDqbS1ghjkbvzojshScUP2dNxNIZf3s9j6O1p2dH+rWHALD5ihT78MqtQRuEuiY7jKLxvmHgilXGllO2I/3oHr9SH3KaDOlYf8ydZI64nPG+6mLbDWplOEwyEMjdp9pfwMd/A0chYHZNv727yl2pPpxEcmhwYvTVyegjDLPLsdXXPE0SKFiCdFSDZ3oGIS8if6oQM010BZc0FaGP83dB/H+oCqWasOvj0CUuADHnRPgMqucabAjhN3lzrt/BU3D96XORoHVNWBdD7QtPn0wPW3YHFUt+r0WC4XItxL1RwEdtpXKhkpyWf1q+H0iRqSkDwIyDxFhA==
+[BACKDOOR] alice -> bob: !upper mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice mas alterada||SIG||UHOj0v1rlSrqQ3YHJnirZVjlzu3MK8ZaBPJjYHMInr2M8LaPJwXqDduEUQK84jJYNPF4MG31qdhmsbqNF6FOjU0MF2b2sIwo0ABL/tWMSYbyrI7tot8BqF2o9MKo26rfC7h0yrPX7LJLf3AwOEXkvJDBYizZUQKd3JQaRJrLl6tmmdhLOz8xZXdglqVIPsM3pmLoyI0LjwJwfPX2PFYtdPUbP0qPBOtSB1tRGf3BK+5xhYHKL8r34TZc0znqgDZh/eaxTeJ5uDcgwPSK8M/cIrGvrjEjRfg8g+srdRdJwrZvvcgE0+IKdFwGuM9NODCUXSNpuXqUkeZbEl8w0M7k/A==
+[DEBUG] Ligacao terminada com ('127.0.0.1', 36178)
+[DEBUG] Ligacao terminada com ('127.0.0.1', 58006)
+
 
 
 Terminal 2:
-$ python3 client.py 
+$ python3 client.py
 [INFO] A ligar ao servidor em 127.0.0.1:5000...
-OK Ligado ao ChatWithBackdoor v3.1. Use REGISTER ou LOGIN.
-Escolhe um username (identidade local): Alice
-[INFO] A usar chaves existentes: Alice_priv.pem, Alice_pub.pem
+OK Ligado ao ChatWithBackdoor v4.0. Use REGISTER ou LOGIN.
+Escolhe um username (identidade local): alice
 Comandos (antes do LOGIN):
-  /register  -> registar username + chave publica no servidor
-  /login     -> autenticar com assinatura de nonce
+  /register  -> registar username + password + chave publica no servidor
+  /login     -> autenticar com username + password + assinatura de nonce
   /quit      -> sair
 -----------------------------------------------------
 > /register
+Escolhe uma password (sem espacos): 
+[INFO] A gerar par de chaves RSA para 'alice'...
+[INFO] Chaves guardadas em alice_priv.pem (encriptada) e alice_pub.pem
 OK REGISTER
 > /login
-NONCE bhcs3C+MAqCI+EA6RhmLIACA2UFjwBCHTqCVBCQ4QF4=
+Password: 
+NONCE K7wh3h2+8D+HiD9KoxPORoI2f+b+CGZZN1Bp+SfCPJc=
 OK LOGIN
-[SERVIDOR] Alice autenticou-se e entrou no chat.
+[SERVIDOR] alice autenticou-se e entrou no chat.
 -----------------------------------------------------
 [INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.
 Comandos (chat + DH):
-  /send <dest> <mensagem>       -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
-  /send_signed <dest> <mensagem>-> enviar mensagem CIFRADA + ASSINADA digitalmente
-  /list                         -> listar utilizadores online
-  /getpk <user>                 -> pedir chave publica RSA de <user> (para verificar assinaturas)
-  /dh_start <user>              -> iniciar DH efemero com <user>
-  /dh_show                      -> mostrar sessoes DH e chaves derivadas
-  /quit                         -> sair
+  /to <dest> <mensagem>                 -> enviar EM CLARO (SEM segurança)
+  /send <dest> <mensagem>               -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
+  /send_signed <dest> <mensagem>        -> enviar mensagem CIFRADA + ASSINADA digitalmente
+  /history <user> [opcoes]              -> historico (ex: -d 2024-12-06, -c 10, ...)
+  /list                                 -> listar utilizadores online
+  /getpk <user>                         -> pedir chave publica RSA de <user>
+  /dh_start <user>                      -> iniciar DH efemero com <user>
+  /dh_show                              -> mostrar sessoes DH e chaves derivadas
+  /quit                                 -> sair
 -----------------------------------------------------
-> [SERVIDOR] Bob autenticou-se e entrou no chat.
-
-> /list
-> USERS Alice, Bob
-
-> /to Bob mensagem em plaintext, sem ser cifrada
-[MSG] Mensagem EM CLARO enviada para Bob.
-
-> /dh_start Bob
-[DH] Iniciado DH com Bob. A aguardar DH_REPLY_FROM Bob...
-> [DH] Sessao DH com Bob COMPLETA (lado iniciador).
-[DH]   Z (primeiros 16 hex): d1c34aa3f0925ac33c88bcf70c96b88d
-[DH]   K_enc (primeiros 16 hex): 86b4176ad61dfcc56b51a8a23b8c0af8
-[DH]   K_mac (primeiros 16 hex): 2277cf004aa6aaee30786b83d943580d
+> [SERVIDOR] bob autenticou-se e entrou no chat.
+    
+> /to bob mensagem em claro enviada
+[MSG] Mensagem EM CLARO enviada para bob.
+> /send bob mensagem cifrada enviada
+[MSG] Nao ha sessao DH estabelecida com bob. Usa /dh_start primeiro.
+> /dh_start bob
+[DH] Iniciado DH com bob. A aguardar DH_REPLY_FROM bob...
+> [DH] Sessao DH com bob COMPLETA (lado iniciador).
+[DH]   Z (primeiros 16 hex): ab2f5f9e0a60cf5ca185423185c7b974
+[DH]   K_enc (primeiros 16 hex): 327feb90fb400b156e233b584a9a1c94
+[DH]   K_mac (primeiros 16 hex): 4170ea398e7d460200bfb4625538c0f4
 
 > /dh_show
-[DH] Sessao com Bob:
-      Z     (16 hex): d1c34aa3f0925ac33c88bcf70c96b88d
-      K_enc (16 hex): 86b4176ad61dfcc56b51a8a23b8c0af8
-      K_mac (16 hex): 2277cf004aa6aaee30786b83d943580d
-> /send Bob mensagem cifrada sem assinatura
-[MSG] Mensagem cifrada enviada para Bob.
-> /send_signed Bob mensagem assinada pela Alice # o Bob ainda nao pediu a chave publica da Alice
-[MSG] Mensagem CIFRADA + ASSINADA enviada para Bob.
-> /send_signed Bob outra mensagem assinada pela Alice # o Bob ja pediu a chave publica da Alice
-[MSG] Mensagem CIFRADA + ASSINADA enviada para Bob.
-> /send Bob !upper esta mensagem vai ser modificada # começa pela palavra !upper, e o server modifica
-[MSG] Mensagem cifrada enviada para Bob.
-> /send_signed Bob !upper mensagem assinada e modificada pelo servidor
-[MSG] Mensagem CIFRADA + ASSINADA enviada para Bob.
+[DH] Sessao com bob:
+      Z     (16 hex): ab2f5f9e0a60cf5ca185423185c7b974
+      K_enc (16 hex): 327feb90fb400b156e233b584a9a1c94
+      K_mac (16 hex): 4170ea398e7d460200bfb4625538c0f4
+> /list
+> USERS alice, bob
+   
+> /send bob mensagem cifrada enviada depois de dh
+[MSG] Mensagem cifrada enviada para bob.
+> /send bob !upper mensagem cifrada enviada depois de dh mas vai ser alterada
+[MSG] Mensagem cifrada enviada para bob.
+> /send_signed bob mensagem enviada cifrada e com assinatura
+[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
+> /send_signed bob mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice
+[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
+> /send_signed bob !upper mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice mas alterada 
+[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
+> /history bob
+> [HISTORY] Historico entre alice e bob (max 50 mensagens):
+[2025-12-07 17:07:43] alice -> bob: mensagem cifrada enviada depois de dh
+[2025-12-07 17:08:15] alice -> bob: MENSAGEM CIFRADA ENVIADA DEPOIS DE DH MAS VAI SER ALTERADA
+[2025-12-07 17:09:41] alice -> bob: mensagem enviada cifrada e com assinatura||SIG||JU6uT8xV5dnpJptextPDg3HcYhWJVgTOnQf7JAt39L7M1SlXoFl3JDP2tAgCNZ+jexmsAwUFWY18BDlAGGS1jfFjZ3GGnVYSW4WAj4H8HZ2VtV7JRu+Z7smHrv/vdnh41syuUz24SRCMOkgnStfgDwNM62eP56Pu8FhSi0FZTbQkq0fjW3xuLa+8YThbRsJoaopxD8qLiXliNn7/e6jVAXPbyRSxNs7zBMCbcIBX/Ft23C7lmM56BxO7pFivugSvSAryh7dFcfEDiG2/fC+w1KgkAlzZ6zNQdRppYqi4FBxy0BCz7oz5/hMFnVVUX5msqaVFHh/WESmYTzNGafChdQ==
+[2025-12-07 17:10:23] alice -> bob: mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice||SIG||n9Q4DneEf+pWJuNDqbS1ghjkbvzojshScUP2dNxNIZf3s9j6O1p2dH+rWHALD5ihT78MqtQRuEuiY7jKLxvmHgilXGllO2I/3oHr9SH3KaDOlYf8ydZI64nPG+6mLbDWplOEwyEMjdp9pfwMd/A0chYHZNv727yl2pPpxEcmhwYvTVyegjDLPLsdXXPE0SKFiCdFSDZ3oGIS8if6oQM010BZc0FaGP83dB/H+oCqWasOvj0CUuADHnRPgMqucabAjhN3lzrt/BU3D96XORoHVNWBdD7QtPn0wPW3YHFUt+r0WC4XItxL1RwEdtpXKhkpyWf1q+H0iRqSkDwIyDxFhA==
+[2025-12-07 17:11:13] alice -> bob: MENSAGEM ENVIADA CIFRADA E COM ASSINATURA DEPOIS DO BOB PEDIR PK DA ALICE MAS ALTERADA||SIG||UHOJ0V1RLSRQQ3YHJNIRZVJLZU3MK8ZABPJJYHMINR2M8LAPJWXQDDUEUQK84JJYNPF4MG31QDHMSBQNF6FOJU0MF2B2SIWO0ABL/TWMSYBYRI7TOT8BQF2O9MKO26RFC7H0YRPX7LJLF3AWOEXKVJDBYIZZUQKD3JQARJRLL6TMMDHLOZ8XZXDGLQVIPSM3PMLOYI0LJWJWFPX2PFYTDPUBP0QPBOTSB1TRGF3BK+5XHYHKL8R34TZC0ZNQGDZH/EAXTEJ5UDCGWPSK8M/CIRGVRJEJRFG8G+SRDRDJWRZVVCGE0+IKDFWGUM9NODCUXSNPUXQUKEZBEL8W0M7K/A==
+
 > /quit
 [INFO] Cliente terminado.
+
 
 
 Terminal 3:
-$ python3 client.py 
+$ python3 client.py
 [INFO] A ligar ao servidor em 127.0.0.1:5000...
-OK Ligado ao ChatWithBackdoor v3.1. Use REGISTER ou LOGIN.
-Escolhe um username (identidade local): Bob
-[INFO] A usar chaves existentes: Bob_priv.pem, Bob_pub.pem
+OK Ligado ao ChatWithBackdoor v4.0. Use REGISTER ou LOGIN.
+Escolhe um username (identidade local): bob
 Comandos (antes do LOGIN):
-  /register  -> registar username + chave publica no servidor
-  /login     -> autenticar com assinatura de nonce
+  /register  -> registar username + password + chave publica no servidor
+  /login     -> autenticar com username + password + assinatura de nonce
   /quit      -> sair
 -----------------------------------------------------
 > /register
+Escolhe uma password (sem espacos): 
+[INFO] A gerar par de chaves RSA para 'bob'...
+[INFO] Chaves guardadas em bob_priv.pem (encriptada) e bob_pub.pem
 OK REGISTER
 > /login
-NONCE cL91vtLOjjx6zoHkJ3/Nc1u4kQEP+G0W3Srnvfvyxe4=
+Password: 
+ERR Username ou password invalida
+[ERRO] Esperava NONCE, recebi: ERR Username ou password invalida
+[ERRO] LOGIN falhou. Tenta outra vez.
+> /login
+Password: 
+NONCE px2wGpIvwMbnVGnNsZTEd0va1Mt3f3HR+imlbVjYJ60=
 OK LOGIN
-[SERVIDOR] Bob autenticou-se e entrou no chat.
-
-> FROM Alice: mensagem em plaintext, sem ser cifrada
-
 -----------------------------------------------------
 [INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.
 Comandos (chat + DH):
-  /send <dest> <mensagem>       -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
-  /send_signed <dest> <mensagem>-> enviar mensagem CIFRADA + ASSINADA digitalmente
-  /list                         -> listar utilizadores online
-  /getpk <user>                 -> pedir chave publica RSA de <user> (para verificar assinaturas)
-  /dh_start <user>              -> iniciar DH efemero com <user>
-  /dh_show                      -> mostrar sessoes DH e chaves derivadas
-  /quit                         -> sair
+  /to <dest> <mensagem>                 -> enviar EM CLARO (SEM segurança)
+  /send <dest> <mensagem>               -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
+  /send_signed <dest> <mensagem>        -> enviar mensagem CIFRADA + ASSINADA digitalmente
+  /history <user> [opcoes]              -> historico (ex: -d 2024-12-06, -c 10, ...)
+  /list                                 -> listar utilizadores online
+  /getpk <user>                         -> pedir chave publica RSA de <user>
+  /dh_start <user>                      -> iniciar DH efemero com <user>
+  /dh_show                              -> mostrar sessoes DH e chaves derivadas
+  /quit                                 -> sair
 -----------------------------------------------------
-> [DH] Recebido DH_INIT_FROM Alice. Sessao DH criada.
-[DH]   Z (primeiros 16 hex): d1c34aa3f0925ac33c88bcf70c96b88d
-[DH]   K_enc (primeiros 16 hex): 86b4176ad61dfcc56b51a8a23b8c0af8
-[DH]   K_mac (primeiros 16 hex): 2277cf004aa6aaee30786b83d943580d
+[SERVIDOR] bob autenticou-se e entrou no chat.
+> FROM alice: mensagem em claro enviada
+[DH] Recebido DH_INIT_FROM alice. Sessao DH criada.
+[DH]   Z (primeiros 16 hex): ab2f5f9e0a60cf5ca185423185c7b974
+[DH]   K_enc (primeiros 16 hex): 327feb90fb400b156e233b584a9a1c94
+[DH]   K_mac (primeiros 16 hex): 4170ea398e7d460200bfb4625538c0f4
+
 > /dh_show
-[DH] Sessao com Alice:
-      Z     (16 hex): d1c34aa3f0925ac33c88bcf70c96b88d
-      K_enc (16 hex): 86b4176ad61dfcc56b51a8a23b8c0af8
-      K_mac (16 hex): 2277cf004aa6aaee30786b83d943580d
-> FROM Alice [cifrado+HMAC]: mensagem cifrada sem assinatura
-FROM Alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem assinada pela Alice
-[INFO] Usa /getpk Alice para poderes verificar assinaturas desse utilizador.
+[DH] Sessao com alice:
+      Z     (16 hex): ab2f5f9e0a60cf5ca185423185c7b974
+      K_enc (16 hex): 327feb90fb400b156e233b584a9a1c94
+      K_mac (16 hex): 4170ea398e7d460200bfb4625538c0f4
+> FROM alice [cifrado+HMAC]: mensagem cifrada enviada depois de dh
+FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA ENVIADA DEPOIS DE DH MAS VAI SER ALTERADA
 
-> /getpk Alice # o Bob pede chave publica da Alice
-> [INFO] Chave publica de Alice recebida e guardada (294 bytes DER).
-FROM Alice [cifrado+HMAC+ASSIN_OK]: outra mensagem assinada pela Alice
-FROM Alice [cifrado+HMAC]: ESTA MENSAGEM VAI SER MODIFICADA
-FROM Alice [cifrado+HMAC+ASSIN_FAIL]: MENSAGEM ASSINADA E MODIFICADA PELO SERVIDOR
-[SERVIDOR] Alice saiu do chat.
+> FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem enviada cifrada e com assinatura
+[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
 
+> /getpk alice
+> [INFO] Chave publica de alice recebida e guardada (294 bytes DER).
+FROM alice [cifrado+HMAC+ASSIN_OK]: mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice
+FROM alice [cifrado+HMAC+ASSIN_FAIL]: MENSAGEM ENVIADA CIFRADA E COM ASSINATURA DEPOIS DO BOB PEDIR PK DA ALICE MAS ALTERADA
+[SERVIDOR] alice saiu do chat.
+ 
 > /quit
 [INFO] Cliente terminado.
 """
-
-
