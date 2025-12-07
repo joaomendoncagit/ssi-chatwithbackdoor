@@ -44,6 +44,14 @@ PORT = 5000
 # Tem de ser igual ao do servidor para a backdoor funcionar.
 K_SERVER = b"0123456789abcdef"  # 16 bytes
 
+# ---------------------------------------------------------------
+# PARÂMETROS GLOBAIS DO SCHNORR (grupo mod p)
+# ---------------------------------------------------------------
+P_SCHNORR = 182320749560328666954403774845227332467884691352689089204930399627621149290203
+Q_SCHNORR = 91160374780164333477201887422613666233942345676344544602465199813810574645101
+G_SCHNORR = 3
+
+
 # Chave privada RSA do utilizador desencriptada em memória
 # (preenchida no LOGIN, usada em /send_signed)
 user_private_key = None
@@ -200,6 +208,21 @@ def load_public_key_pem(username: str) -> bytes:
     _, pub_file = get_key_filenames(username)
     with open(pub_file, "rb") as f:
         return f.read()
+
+# ---------------------------------------------------------------
+# SCHNORR: derivação de segredo x a partir de (username, password)
+# ---------------------------------------------------------------
+def schnorr_derive_secret_x(username: str, password: str) -> int:
+    """
+    Deriva o segredo Schnorr x = H(username_normalizado || ":" || password) mod Q_SCHNORR.
+    """
+    username_norm = username.strip().lower()
+    data = (username_norm + ":" + password).encode("utf-8")
+    h = hashlib.sha256(data).digest()
+    x = int.from_bytes(h, "big") % Q_SCHNORR
+    if x == 0:
+        x = 1
+    return x
 
 
 # ---------------------------------------------------------------
@@ -525,7 +548,13 @@ def register_and_wait_response(sock: socket.socket, username: str, password: str
     )
     b64_pk = base64.b64encode(der_bytes).decode("utf-8")
 
-    wire = f"REGISTER {username} {password} {b64_pk}\n"
+    # Schnorr: derivar x e calcular y = g^x mod p
+    x = schnorr_derive_secret_x(username, password)
+    y_int = pow(G_SCHNORR, x, P_SCHNORR)
+    y_bytes = y_int.to_bytes((y_int.bit_length() + 7) // 8 or 1, "big")
+    y_b64 = base64.b64encode(y_bytes).decode("utf-8")
+
+    wire = f"REGISTER {username} {password} {b64_pk} {y_b64}\n"
     sock.sendall(wire.encode("utf-8"))
 
     data = sock.recv(4096)
@@ -536,6 +565,7 @@ def register_and_wait_response(sock: socket.socket, username: str, password: str
     resp = data.decode("utf-8", errors="ignore").strip()
     print(resp)
     return resp.startswith("OK")
+
 
 
 def perform_login(sock: socket.socket, username: str, password: str):
@@ -614,6 +644,98 @@ def perform_login(sock: socket.socket, username: str, password: str):
         return True
 
     return False
+
+def perform_login_zkp(sock: socket.socket, username: str, password: str):
+    """
+    LOGIN via protocolo de conhecimento zero de Schnorr:
+      1) Cliente deriva x a partir de (username, password).
+      2) Escolhe r, calcula t = g^r mod p e envia:
+           LOGIN_ZKP <username> <t_b64>
+      3) Servidor responde com:
+           ZKP_CHALLENGE <c_b64>
+      4) Cliente calcula s = r + c*x mod Q_SCHNORR e envia:
+           LOGIN_ZKP_RESP <username> <s_b64>
+      5) Se a verificação no servidor passar, recebe "OK LOGIN_ZKP".
+         Nesta altura também desencriptamos a chave privada RSA localmente
+         com a mesma password (como no LOGIN normal).
+    """
+    global user_private_key
+
+    if not keys_exist(username):
+        print(
+            "[ERRO] Nao existem chaves RSA locais para este username.\n"
+            "       Faz /register neste dispositivo primeiro para gerar as chaves."
+        )
+        return False
+
+    # Derivar segredo Schnorr x
+    x = schnorr_derive_secret_x(username, password)
+
+    # Escolher r aleatorio mod Q_SCHNORR e calcular t = g^r mod p
+    r_bytes = os.urandom(32)
+    r = int.from_bytes(r_bytes, "big") % Q_SCHNORR
+    if r == 0:
+        r = 1
+
+    t_int = pow(G_SCHNORR, r, P_SCHNORR)
+    t_bytes = t_int.to_bytes((t_int.bit_length() + 7) // 8 or 1, "big")
+    t_b64 = base64.b64encode(t_bytes).decode("utf-8")
+
+    # 1) Enviar commitment t
+    wire = f"LOGIN_ZKP {username} {t_b64}\n"
+    sock.sendall(wire.encode("utf-8"))
+
+    # 2) Esperar desafio do servidor
+    data = sock.recv(4096)
+    if not data:
+        print("[ERRO] Servidor fechou a ligacao durante LOGIN_ZKP.")
+        return False
+
+    line = data.decode("utf-8", errors="ignore").strip()
+    print(line)
+
+    if not line.startswith("ZKP_CHALLENGE "):
+        print(f"[ERRO] Esperava ZKP_CHALLENGE, recebi: {line}")
+        return False
+
+    c_b64 = line[len("ZKP_CHALLENGE ") :].strip()
+    try:
+        c_bytes = base64.b64decode(c_b64.encode("utf-8"), validate=True)
+        c_int = int.from_bytes(c_bytes, "big") % Q_SCHNORR
+    except Exception:
+        print("[ERRO] Desafio ZKP nao e base64 valido.")
+        return False
+
+    # 3) Calcular resposta s = r + c*x mod Q_SCHNORR
+    s_int = (r + c_int * x) % Q_SCHNORR
+    s_bytes = s_int.to_bytes((s_int.bit_length() + 7) // 8 or 1, "big")
+    s_b64 = base64.b64encode(s_bytes).decode("utf-8")
+
+    wire = f"LOGIN_ZKP_RESP {username} {s_b64}\n"
+    sock.sendall(wire.encode("utf-8"))
+
+    # 4) Ler resultado final do servidor
+    data = sock.recv(4096)
+    if not data:
+        print("[ERRO] Servidor fechou a ligacao depois de LOGIN_ZKP_RESP.")
+        return False
+
+    resp = data.decode("utf-8", errors="ignore").strip()
+    print(resp)
+    if not resp.startswith("OK LOGIN_ZKP"):
+        return False
+
+    # Se chegou aqui, login ZKP passou -> desencriptar chave RSA localmente
+    try:
+        private_key = load_private_key(username, password)
+    except Exception:
+        print("[ERRO] Nao foi possivel desencriptar a chave privada com essa password.")
+        return False
+
+    with user_priv_lock:
+        user_private_key = private_key
+
+    return True
 
 
 # ---------------------------------------------------------------
@@ -867,11 +989,11 @@ def main():
             continue
 
         if line == "/login":
-            password = getpass.getpass("Password: ")
+            password = getpass.getpass("Password para ZKP: ")
             if not password:
                 print("[ERRO] Password vazia.")
                 continue
-            ok = perform_login(sock, username, password)
+            ok = perform_login_zkp(sock, username, password)
             if ok:
                 authenticated = True
                 break

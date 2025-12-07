@@ -50,6 +50,21 @@ PORT = 5000
 # Chave secreta do servidor para a backdoor (AES-128)
 K_SERVER = b"0123456789abcdef"  # 16 bytes
 
+# ---------------------------------------------------
+# PARÂMETROS GLOBAIS DO SCHNORR (grupo mod p)
+# ---------------------------------------------------
+# p e q formam um "safe prime": p = 2q + 1, q primo.
+# g é um gerador da sub-grupo de ordem q.
+P_SCHNORR = 182320749560328666954403774845227332467884691352689089204930399627621149290203
+Q_SCHNORR = 91160374780164333477201887422613666233942345676344544602465199813810574645101
+G_SCHNORR = 3
+
+# Nonces de login pendentes: conn -> (username_normalizado, nonce_bytes)
+pending_nonces = {}
+
+# Nonces de login Schnorr (ZKP) pendentes: conn -> (username_normalizado, t_int, c_int, y_int)
+pending_schnorr = {}
+
 # Utilizadores registados em memoria: username -> public_key (objeto cryptography)
 # (chave SEMPRE normalizada para lowercase)
 users = {}
@@ -151,7 +166,6 @@ def hmac_sha256(key: bytes, data: bytes) -> bytes:
     # HMAC usado para garantir integridade (não-confundível) das mensagens
     return hmac.new(key, data, hashlib.sha256).digest()
 
-
 # ---------------------------------------------------
 # PASSWORDS (hash + salt)
 # ---------------------------------------------------
@@ -217,12 +231,11 @@ def init_db(db_path: str = "chat.db"):
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username      TEXT    NOT NULL UNIQUE,
-            password_hash TEXT    NOT NULL,
-            salt          BLOB    NOT NULL,
             pubkey_b64    TEXT    NOT NULL
         );
         """
     )
+
 
     # Tabela de mensagens cifradas (tudo guardado em base64, mais timestamp)
     cur.execute(
@@ -237,6 +250,17 @@ def init_db(db_path: str = "chat.db"):
             iv_b64      TEXT    NOT NULL,
             cipher_b64  TEXT    NOT NULL,
             tag_b64     TEXT    NOT NULL
+        );
+        """
+    )
+    
+    # Tabela para chaves públicas Schnorr (ZKP) por utilizador
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schnorr_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username   TEXT NOT NULL UNIQUE,
+            y_b64      TEXT NOT NULL
         );
         """
     )
@@ -370,13 +394,13 @@ def fetch_user_record(username: str):
 
     with db_lock:
         cur = db_conn.cursor()
-        # Comparacao case-insensitive no campo username
         cur.execute(
-            "SELECT password_hash, salt, pubkey_b64 FROM users WHERE LOWER(username) = ?",
+            "SELECT pubkey_b64 FROM users WHERE LOWER(username) = ?",
             (username_norm,),
         )
         row = cur.fetchone()
     return row
+
 
 
 def create_user(username: str, password: str, pubkey_b64: str):
@@ -390,33 +414,60 @@ def create_user(username: str, password: str, pubkey_b64: str):
 
     username_norm = norm_username(username)
 
-    salt = os.urandom(16)
-    pwd_hash = hash_password(password, salt)
-
     with db_lock:
         cur = db_conn.cursor()
         cur.execute(
             """
-            INSERT INTO users (username, password_hash, salt, pubkey_b64)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO users (username, pubkey_b64)
+            VALUES (?, ?)
             """,
-            (username_norm, pwd_hash, salt, pubkey_b64),
+            (username_norm, pubkey_b64),
+        )
+        db_conn.commit()
+
+def store_schnorr_pub(username: str, y_b64: str):
+    """
+    Guarda a chave publica Schnorr (y) para um utilizador.
+    """
+    if db_conn is None:
+        raise RuntimeError("BD nao inicializada")
+
+    username_norm = norm_username(username)
+
+    with db_lock:
+        cur = db_conn.cursor()
+        # REPLACE para permitir actualizar a y se necessário
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO schnorr_users (username, y_b64)
+            VALUES (?, ?)
+            """,
+            (username_norm, y_b64),
         )
         db_conn.commit()
 
 
-def verify_user_password(username: str, password: str) -> bool:
+def fetch_schnorr_pub(username: str) -> str | None:
     """
-    Verifica se username existe e se a password corresponde ao hash guardado.
-    (case-insensitive)
+    Vai buscar a chave publica Schnorr (y_b64) de um utilizador
+    ou None se nao existir.
     """
-    row = fetch_user_record(username)
-    if row is None:
-        return False
+    if db_conn is None:
+        return None
 
-    stored_hash, salt, _ = row
-    calc_hash = hash_password(password, salt)
-    return hmac.compare_digest(stored_hash, calc_hash)
+    username_norm = norm_username(username)
+
+    with db_lock:
+        cur = db_conn.cursor()
+        cur.execute(
+            "SELECT y_b64 FROM schnorr_users WHERE LOWER(username) = ?",
+            (username_norm,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return None
+    return row[0]
 
 
 # ---------------------------------------------------
@@ -478,14 +529,18 @@ def handle_client(conn: socket.socket, addr):
             # 1) REGISTO
             #     REGISTER <username> <password> <pubkey_der_base64>
             # ---------------------------------------------------
+            # ---------------------------------------------------
+            # 1) REGISTO
+            #     REGISTER <username> <password> <pubkey_der_base64> <schnorr_y_b64>
+            # ---------------------------------------------------
             if line.startswith("REGISTER "):
-                parts = line.split(" ", 3)
-                if len(parts) < 4:
+                parts = line.split(" ", 4)
+                if len(parts) < 5:
                     conn.sendall(
-                        b"ERR Uso: REGISTER <username> <password> <pubkey_der_base64>\n"
+                        b"ERR Uso: REGISTER <username> <password> <pubkey_der_base64> <schnorr_y_b64>\n"
                     )
                     continue
-                _, username_raw, password_raw, b64_pk = parts
+                _, username_raw, password_raw, b64_pk, schnorr_y_b64 = parts
                 username = norm_username(username_raw)
                 password = password_raw.strip()
 
@@ -509,9 +564,24 @@ def handle_client(conn: socket.socket, addr):
                     conn.sendall(b"ERR Chave publica invalida (base64/DER)\n")
                     continue
 
+                # Validar y Schnorr recebido
+                try:
+                    y_bytes = base64.b64decode(
+                        schnorr_y_b64.encode("utf-8"), validate=True
+                    )
+                    y_int = int.from_bytes(y_bytes, "big")
+                    if not (1 < y_int < P_SCHNORR):
+                        conn.sendall(b"ERR schnorr_y fora do intervalo\n")
+                        continue
+                except Exception:
+                    conn.sendall(b"ERR schnorr_y_b64 invalido\n")
+                    continue
+
                 # Criar utilizador na BD (password hash + salt + pubkey_b64)
                 try:
                     create_user(username, password, b64_pk)
+                    # Guardar chave publica Schnorr numa tabela separada
+                    store_schnorr_pub(username, schnorr_y_b64)
                 except sqlite3.IntegrityError:
                     conn.sendall(b"ERR Username ja registado\n")
                     continue
@@ -527,118 +597,107 @@ def handle_client(conn: socket.socket, addr):
                 conn.sendall(b"OK REGISTER\n")
                 continue
 
+                        # ---------------------------------------------------
+            # 2) LOGIN_ZKP - Schnorr (zero knowledge)
+            #     LOGIN_ZKP <username> <t_b64>
+            #     (cliente envia commitment t = g^r mod p)
             # ---------------------------------------------------
-            # 2) LOGIN - PASSWORD + NONCE
-            #     LOGIN <username> <password>
-            # ---------------------------------------------------
-            if line.startswith("LOGIN "):
+            if line.startswith("LOGIN_ZKP "):
                 parts = line.split(" ", 2)
                 if len(parts) < 3:
-                    conn.sendall(b"ERR Uso: LOGIN <username> <password>\n")
+                    conn.sendall(b"ERR Uso: LOGIN_ZKP <username> <t_b64>\n")
                     continue
-                _, username_raw, password_raw = parts
+                _, username_raw, t_b64 = parts
                 username = norm_username(username_raw)
-                password = password_raw.strip()
 
-                if not username or not password:
-                    conn.sendall(b"ERR Username ou password vazios\n")
+                # Ir buscar y Schnorr do utilizador
+                y_b64 = fetch_schnorr_pub(username)
+                if y_b64 is None:
+                    conn.sendall(b"ERR Username nao registado (ZKP)\n")
                     continue
 
-                # 1) Verificar password na BD 
-                if not verify_user_password(username, password):
-                    conn.sendall(b"ERR Username ou password invalida\n")
+                try:
+                    y_bytes = base64.b64decode(y_b64.encode("utf-8"), validate=True)
+                    y_int = int.from_bytes(y_bytes, "big")
+                    if not (1 < y_int < P_SCHNORR):
+                        conn.sendall(b"ERR schnorr_y invalido na BD\n")
+                        continue
+
+                    t_bytes = base64.b64decode(t_b64.encode("utf-8"), validate=True)
+                    t_int = int.from_bytes(t_bytes, "big")
+                    if not (1 < t_int < P_SCHNORR):
+                        conn.sendall(b"ERR t invalido\n")
+                        continue
+                except Exception:
+                    conn.sendall(b"ERR Campos base64 invalidos em LOGIN_ZKP\n")
                     continue
 
-                # 2) Garantir que temos chave publica em memoria
-                with lock:
-                    pk_obj = users.get(username)
-
-                if pk_obj is None:
-                    # Se ainda nao estiver em memoria, recarregamos da BD
-                    row = fetch_user_record(username)
-                    if row is None:
-                        conn.sendall(
-                            b"ERR Erro interno (utilizador sem registo completo na BD)\n"
-                        )
-                        continue
-                    _, _, pubkey_b64 = row
-                    try:
-                        der_bytes = base64.b64decode(
-                            pubkey_b64.encode("utf-8"), validate=True
-                        )
-                        pk_obj = load_public_key_from_der(der_bytes)
-                        with lock:
-                            users[username] = pk_obj
-                    except Exception:
-                        conn.sendall(
-                            b"ERR Erro interno ao carregar chave publica do utilizador\n"
-                        )
-                        continue
-
-                # 3) Password OK -> gerar NONCE (2.ª fase do LOGIN)
-                nonce = os.urandom(32)
-                b64_nonce = base64.b64encode(nonce).decode("utf-8")
+                # Gerar desafio c aleatório em [0, Q_SCHNORR-1]
+                c_bytes = os.urandom(32)
+                c_int = int.from_bytes(c_bytes, "big") % Q_SCHNORR
 
                 with lock:
-                    # Associar nonce ao username normalizado
-                    pending_nonces[conn] = (username, nonce)
+                    pending_schnorr[conn] = (username, t_int, c_int, y_int)
 
-                conn.sendall(f"NONCE {b64_nonce}\n".encode("utf-8"))
+                c_bytes_norm = c_int.to_bytes((c_int.bit_length() + 7) // 8 or 1, "big")
+                c_b64 = base64.b64encode(c_bytes_norm).decode("utf-8")
+                conn.sendall(f"ZKP_CHALLENGE {c_b64}\n".encode("utf-8"))
                 continue
 
             # ---------------------------------------------------
-            # 3) LOGIN_SIG - ASSINATURA DO NONCE
-            #     LOGIN_SIG <username> <signature_base64>
+            # 2) LOGIN_ZKP_RESP - resposta Schnorr
+            #     LOGIN_ZKP_RESP <username> <s_b64>
             # ---------------------------------------------------
-            if line.startswith("LOGIN_SIG "):
+            if line.startswith("LOGIN_ZKP_RESP "):
                 parts = line.split(" ", 2)
                 if len(parts) < 3:
-                    conn.sendall(b"ERR Uso: LOGIN_SIG <username> <signature_base64>\n")
+                    conn.sendall(b"ERR Uso: LOGIN_ZKP_RESP <username> <s_b64>\n")
                     continue
-                _, username_raw, b64_sig = parts
+                _, username_raw, s_b64 = parts
                 username = norm_username(username_raw)
 
                 try:
-                    signature = base64.b64decode(b64_sig.encode("utf-8"), validate=True)
+                    s_bytes = base64.b64decode(s_b64.encode("utf-8"), validate=True)
+                    s_int = int.from_bytes(s_bytes, "big")
                 except Exception:
-                    conn.sendall(b"ERR Signature nao e base64 valida\n")
+                    conn.sendall(b"ERR s_b64 invalido\n")
                     continue
 
                 with lock:
-                    pending = pending_nonces.get(conn)
+                    pend = pending_schnorr.get(conn)
 
-                if pending is None:
-                    conn.sendall(b"ERR Nao ha nonce de login pendente para esta ligacao\n")
+                if pend is None:
+                    conn.sendall(b"ERR Nao ha desafio ZKP pendente para esta ligacao\n")
                     continue
 
-                nonce_username, nonce = pending
+                pend_username, t_int, c_int, y_int = pend
 
-                # Proteger contra troca de username entre LOGIN e LOGIN_SIG
-                if nonce_username != username:
-                    conn.sendall(b"ERR Username nao corresponde ao nonce pendente\n")
+                if pend_username != username:
+                    conn.sendall(b"ERR Username nao corresponde ao ZKP pendente\n")
                     continue
 
-                with lock:
-                    pubkey = users.get(username)
+                # Verificar prova Schnorr: g^s ?= t * y^c (mod p)
+                left = pow(G_SCHNORR, s_int, P_SCHNORR)
+                right = (t_int * pow(y_int, c_int, P_SCHNORR)) % P_SCHNORR
 
-                if pubkey is None:
-                    conn.sendall(b"ERR Username nao registado\n")
+                if left != right:
+                    conn.sendall(b"ERR LOGIN_ZKP falhou (prova invalida)\n")
+                    with lock:
+                        pending_schnorr.pop(conn, None)
                     continue
 
-                ok = verify_signature(pubkey, nonce, signature)
-                if not ok:
-                    conn.sendall(b"ERR LOGIN assinatura invalida\n")
-                    continue
-
+                # Sucesso: marcar autenticado
                 authenticated = True
                 current_username = username  # normalizado
 
                 with lock:
-                    pending_nonces.pop(conn, None)
-                    online_clients[current_username] = conn  # chave normalizada
+                    pending_schnorr.pop(conn, None)
+                    online_clients[current_username] = conn
 
-                conn.sendall(b"OK LOGIN\n")
-                broadcast_system_message(f"{current_username} autenticou-se e entrou no chat.")
+                conn.sendall(b"OK LOGIN_ZKP\n")
+                broadcast_system_message(
+                    f"{current_username} autenticou-se via ZKP e entrou no chat."
+                )
                 continue
 
             # ---------------------------------------------------
@@ -649,7 +708,7 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             # ---------------------------------------------------
-            # 4) GET_PK <username>
+            # 3) GET_PK <username>
             #     devolve a chave publica RSA de outro utilizador
             # ---------------------------------------------------
             if line.startswith("GET_PK "):
@@ -681,7 +740,7 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             # ---------------------------------------------------
-            # 5) DH_INIT: encaminhar chave DH efemera
+            # 4) DH_INIT: encaminhar chave DH efemera
             # ---------------------------------------------------
             if line.startswith("DH_INIT "):
                 parts = line.split(" ", 2)
@@ -706,7 +765,7 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             # ---------------------------------------------------
-            # 6) DH_REPLY: encaminhar resposta DH
+            # 5) DH_REPLY: encaminhar resposta DH
             # ---------------------------------------------------
             if line.startswith("DH_REPLY "):
                 parts = line.split(" ", 2)
@@ -731,7 +790,7 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             # ---------------------------------------------------
-            # 7) LIST
+            # 6) LIST
             # ---------------------------------------------------
             if line == "LIST":
                 with lock:
@@ -740,7 +799,7 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             # ---------------------------------------------------
-            # 8) HISTORY dest [opções]
+            # 7) HISTORY dest [opções]
             #     HISTORY <user> [-d YYYY-MM-DD|--date YYYY-MM-DD] [-c N|--count N]
             #     Usa a backdoor para ler mensagens cifradas da BD.
             # ---------------------------------------------------
@@ -867,7 +926,7 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             # ---------------------------------------------------
-            # 9) TO <dest> <mensagem>  (modo antigo, em claro)
+            # 8) TO <dest> <mensagem>  (modo antigo, em claro)
             # ---------------------------------------------------
             if line.startswith("TO "):
                 parts = line.split(" ", 2)
@@ -893,7 +952,7 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             # ---------------------------------------------------
-            # 10) MSG <dest> <b64_header> <b64_blob> <b64_iv> <b64_cipher> <b64_tag>
+            # 9) MSG <dest> <b64_header> <b64_blob> <b64_iv> <b64_cipher> <b64_tag>
             #     -> servidor usa backdoor para ler/alterar e guarda na BD
             # ---------------------------------------------------
             if line.startswith("MSG "):
@@ -992,14 +1051,14 @@ def handle_client(conn: socket.socket, addr):
                 continue
 
             # ---------------------------------------------------
-            # 11) QUIT
+            # 10) QUIT
             # ---------------------------------------------------
             if line == "QUIT":
                 conn.sendall(b"OK Adeus\n")
                 break
 
             # ---------------------------------------------------
-            # 12) Comando desconhecido
+            # 11) Comando desconhecido
             # ---------------------------------------------------
             conn.sendall(b"ERR Comando desconhecido\n")
 
@@ -1010,8 +1069,10 @@ def handle_client(conn: socket.socket, addr):
         # Limpar estado do utilizador quando a ligação termina
         with lock:
             pending_nonces.pop(conn, None)
+            pending_schnorr.pop(conn, None)
             if current_username and online_clients.get(current_username) is conn:
                 del online_clients[current_username]
+
 
         if current_username:
             broadcast_system_message(f"{current_username} saiu do chat.")
