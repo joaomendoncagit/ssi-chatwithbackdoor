@@ -1,181 +1,183 @@
 ================================================================================
-FULL STEP-BY-STEP EXPLANATION (C1 / S / C2) + BACKDOORS
+EXPLICAÇÃO PASSO-A-PASSO COMPLETA (C1 / S / C2) + BACKDOORS
 ================================================================================
 
-Notation:
-  C1 = client 1 (Alice)
-  C2 = client 2 (Bob)
-  S  = server (malicious / with backdoors)
+Notação:
+  C1 = cliente 1 (Alice)
+  C2 = cliente 2 (Bob)
+  S  = servidor (malicioso / com backdoors)
 
-Commands:
-  /register     -> create user + upload public keys (RSA + Schnorr)
-  /login        -> prove knowledge of password via Schnorr ZKP
-  /dh_start     -> create DH session for symmetric encryption
-  /send         -> encrypted message (AES-CBC + HMAC) but with a blob backdoor
-  /send_signed  -> encrypted + signed message, but signatures are subverted
+Comandos:
+  /register     -> criar utilizador + enviar chaves públicas (RSA + Schnorr)
+  /login        -> provar conhecimento da password via Schnorr ZKP
+  /dh_start     -> criar sessão DH para cifra simétrica
+  /send         -> mensagem cifrada (AES-CBC + HMAC) mas com backdoor via blob
+  /send_signed  -> mensagem cifrada + assinada, mas as assinaturas também são subvertidas
 
-We go in the order things appear logically in your code.
+Vamos seguir pela ordem lógica em que as coisas aparecem no teu código.
 
 --------------------------------------------------------------------------------
-1. REGISTRATION PHASE (/register)
+1. FASE DE REGISTO (/register)
 --------------------------------------------------------------------------------
 
-(1.1) C1 generates local RSA keys
----------------------------------
-C1 locally generates an RSA keypair:
+(1.1) C1 gera chaves RSA localmente
+-----------------------------------
+C1 gera localmente um par de chaves RSA:
 
   sk_Alice_real, pk_Alice_real = RSA.generate()
 
-These are only on C1:
-  - sk_Alice_real (private) is encrypted on disk with the password.
-  - pk_Alice_real (public) is kept plaintext in alice_pub.pem.
+Isto existe apenas em C1:
+  - sk_Alice_real (privada) é encriptada em disco com a password.
+  - pk_Alice_real (pública) fica em texto claro em alice_pub.pem.
 
-(1.2) C1 derives Schnorr secret x
----------------------------------
-C1 derives a Schnorr secret from username + password:
+(1.2) C1 deriva o segredo Schnorr x
+-----------------------------------
+C1 deriva um segredo Schnorr a partir de username + password:
 
   username_norm = lower(username)
   x = H(username_norm || ":" || password) mod Q_SCHNORR
 
-Then computes the Schnorr public key:
+Depois calcula a chave pública Schnorr:
 
   y = g^x mod p
 
-(1.3) C1 sends registration data to S
--------------------------------------
-C1 -> S sends:
+(1.3) C1 envia dados de registo para S
+--------------------------------------
+C1 -> S envia:
 
   REGISTER username password pk_Alice_real_DER_base64 y_base64
 
-S receives:
+S recebe:
   - username
-  - password (not really used for auth here in final version)
-  - pk_Alice_real (the "true" RSA public key from the client)
-  - y (Schnorr public key for future ZKP login)
+  - password (que nesta versão final nem é usada para auth clássica)
+  - pk_Alice_real (a verdadeira chave pública RSA do cliente)
+  - y (chave pública Schnorr para login ZKP futuro)
 
-(1.4) S stores user + Schnorr key in DB
----------------------------------------
-S stores in the database:
+(1.4) S guarda utilizador + chave Schnorr na BD
+-----------------------------------------------
+S guarda na base de dados:
 
-  - users table:
+  - tabela users:
       username (lowercase)
       pubkey_b64 = pk_Alice_real_DER_base64
 
-  - schnorr_users table:
+  - tabela schnorr_users:
       username (lowercase)
-      y_b64 = Schnorr public key y (base64)
+      y_b64 = chave pública Schnorr y (em base64)
 
-S also loads pk_Alice_real into memory:
+S também carrega pk_Alice_real para memória:
   users[username] = pk_Alice_real_object
 
 
-(1.5) S creates impersonation keypair for this user
----------------------------------------------------
-Here is the "first big backdoor":
+(1.5) S cria um par de chaves de "impersonação" para este utilizador
+--------------------------------------------------------------------
+Aqui está o "primeiro grande backdoor":
 
-For each registered user, S generates his own RSA keypair:
+Para cada utilizador registado, S gera o seu próprio par de chaves RSA:
 
   sk_Server_as_Alice, pk_Server_as_Alice = RSA.generate()
 
-and stores:
+e guarda:
 
   impersonation_keys["alice"] = sk_Server_as_Alice
 
-This private key is only known by S.
+Esta chave privada só é conhecida pelo servidor.
 
-This means:
-  - S can produce signatures that will look like "Alice",
-    as long as clients later use pk_Server_as_Alice to verify.
+Isto significa:
+  - O servidor consegue produzir assinaturas que parecem vir da "Alice",
+    desde que os clientes usem mais tarde pk_Server_as_Alice para verificar.
 
-S -> C1 replies:
+S -> C1 responde:
 
   OK REGISTER
 
 
 --------------------------------------------------------------------------------
-2. LOGIN PHASE (/login via Schnorr ZKP)
+2. FASE DE LOGIN (/login via Schnorr ZKP)
 --------------------------------------------------------------------------------
 
-(2.1) C1 computes Schnorr values r, t
--------------------------------------
-C1 derives again:
+(2.1) C1 calcula r e t para Schnorr
+-----------------------------------
+C1 volta a derivar:
 
   x = H(username_norm || ":" || password) mod Q
 
-Then choose random r:
+Depois escolhe r aleatório:
 
-  r random in [1, Q-1]
+  r aleatório em [1, Q-1]
   t = g^r mod p
 
-C1 -> S sends:
+C1 -> S envia:
 
   LOGIN_ZKP username t_b64
 
-(2.2) S looks up Schnorr public key and sends challenge
--------------------------------------------------------
-S does:
+(2.2) S obtém a chave Schnorr e envia desafio
+---------------------------------------------
+S faz:
 
   y_b64 = fetch_schnorr_pub(username)
-  y_int = decode(y_b64)  # from DB
+  y_int = decode(y_b64)  # da BD
 
-S generates random challenge c:
+S gera um desafio aleatório c:
 
-  c_int random in [0, Q-1]
-  (store (username, t, c, y) in pending_schnorr[conn])
+  c_int aleatório em [0, Q-1]
+  (guarda (username, t, c, y) em pending_schnorr[conn])
 
-S -> C1 sends:
+S -> C1 envia:
 
   ZKP_CHALLENGE c_b64
 
-(2.3) C1 computes response s
------------------------------
-C1 decodes c, then computes:
+(2.3) C1 calcula resposta s
+---------------------------
+C1 descodifica c e calcula:
 
   s = r + c * x mod Q
 
-C1 -> S sends:
+C1 -> S envia:
 
   LOGIN_ZKP_RESP username s_b64
 
-(2.4) S verifies Schnorr proof
-------------------------------
-S retrieves (username, t, c, y) from pending_schnorr.
+(2.4) S verifica a prova Schnorr
+--------------------------------
+S vai buscar (username, t, c, y) de pending_schnorr.
 
-Verifies:
+Verifica:
 
   left  = g^s mod p
   right = t * y^c mod p
 
-If left == right:
-  - ZKP success
-  - user is authenticated
-  - S marks current_username = username
-  - S adds (username -> socket) in online_clients
+Se left == right:
+  - ZKP tem sucesso
+  - o utilizador fica autenticado
+  - S marca current_username = username
+  - S adiciona (username -> socket) em online_clients
 
-S -> C1 sends:
+S -> C1 envia:
 
   OK LOGIN_ZKP
 
-Additionally:
-  - C1 locally decrypts its RSA private key with password
-    and stores sk_Alice_real in memory to sign messages.
+Além disso:
+  - C1 desencripta localmente a sua chave privada RSA com a password
+    e guarda sk_Alice_real em memória para assinar mensagens.
 
-This ZKP login ensures:
-  - S learns nothing about password x itself (beyond what it can brute force),
-  - But S still controls everything else (keys, routing, backdoor, etc.).
+Este login com ZKP garante:
+  - S não aprende diretamente a password ou x (para além do que conseguir
+    por brute-force),
+  - Mas S continua a controlar o resto (distribuição de chaves, routing,
+    backdoors, etc.).
 
 
 --------------------------------------------------------------------------------
-3. DIFFIE-HELLMAN PHASE (/dh_start)
+3. FASE DIFFIE-HELLMAN (/dh_start)
 --------------------------------------------------------------------------------
 
-(3.1) C1 initiates DH with C2
------------------------------
-C1 generates an X25519 keypair:
+(3.1) C1 inicia DH com C2
+-------------------------
+C1 gera um par de chaves X25519:
 
   dh_priv_Alice, dh_pub_Alice = X25519.generate()
 
-C1 stores:
+C1 guarda:
 
   dh_sessions["bob"] = {
       "dh_priv": dh_priv_Alice,
@@ -184,32 +186,32 @@ C1 stores:
       "k_mac": None
   }
 
-C1 -> S sends:
+C1 -> S envia:
 
   DH_INIT bob base64(dh_pub_Alice)
 
-(3.2) S forwards DH_INIT to C2
-------------------------------
-S looks up dest "bob" in online_clients, then:
+(3.2) S encaminha DH_INIT para C2
+---------------------------------
+S procura o dest "bob" em online_clients e depois:
 
-S -> C2 sends:
+S -> C2 envia:
 
   DH_INIT_FROM alice base64(dh_pub_Alice)
 
-(3.3) C2 responds with its DH public key
-----------------------------------------
-C2 on receiving DH_INIT_FROM:
-  - generates dh_priv_Bob, dh_pub_Bob
-  - computes shared secret:
+(3.3) C2 responde com a sua chave DH pública
+--------------------------------------------
+C2 ao receber DH_INIT_FROM:
+  - gera dh_priv_Bob, dh_pub_Bob
+  - calcula o segredo partilhado:
 
       shared_B = dh_priv_Bob.exchange(dh_pub_Alice)
 
-  - derives keys:
+  - deriva as chaves:
 
       K_enc = SHA256("enc" || shared)[0:16]
       K_mac = SHA256(K_enc)
 
-  - stores in dh_sessions["alice"]:
+  - guarda em dh_sessions["alice"]:
       {
         "dh_priv": dh_priv_Bob,
         "shared": shared_B,
@@ -217,158 +219,159 @@ C2 on receiving DH_INIT_FROM:
         "k_mac": K_mac
       }
 
-C2 -> S sends:
+C2 -> S envia:
 
   DH_REPLY alice base64(dh_pub_Bob)
 
-(3.4) S forwards DH_REPLY to C1
--------------------------------
-S -> C1 sends:
+(3.4) S encaminha DH_REPLY para C1
+----------------------------------
+S -> C1 envia:
 
   DH_REPLY_FROM bob base64(dh_pub_Bob)
 
-C1 receives, computes:
+C1 recebe e calcula:
 
   shared_A = dh_priv_Alice.exchange(dh_pub_Bob)
 
-Then derives:
+Depois deriva:
 
   K_enc = SHA256("enc" || shared_A)[0:16]
   K_mac = SHA256(K_enc)
 
-Now both C1 and C2 share:
-  - K_enc (AES key)
-  - K_mac (HMAC key)
+Agora C1 e C2 partilham:
+  - K_enc (chave AES)
+  - K_mac (chave de HMAC)
 
-BUT the next step is crucial: the "blob" backdoor lets S recover K_enc.
+MAS o passo seguinte é crucial: o "blob" backdoor permite ao servidor
+recuperar K_enc.
 
 
 --------------------------------------------------------------------------------
-4. /send — ENCRYPTED MESSAGE WITH BLOB BACKDOOR
+4. /send — MENSAGEM CIFRADA COM BACKDOOR VIA BLOB
 --------------------------------------------------------------------------------
 
-(4.1) C1 builds encrypted packet
---------------------------------
-When C1 calls:
+(4.1) C1 constrói o pacote cifrado
+----------------------------------
+Quando C1 faz:
 
-  /send bob <message>
+  /send bob <mensagem>
 
-Client code:
+O cliente faz:
 
   - header = "alice->bob".encode()
-  - K_enc, K_mac from DH session
+  - K_enc, K_mac vindos da sessão DH
   - blob = AES_ECB_Encrypt(K_SERVER, K_enc)    # BACKDOOR!
-  - iv   = blob[0:16]                          # uses part of blob as IV
+  - iv   = blob[0:16]                          # usa parte do blob como IV
   - cipher = AES_CBC_Encrypt(K_enc, iv, msg)
   - tag    = HMAC_SHA256(K_mac, header || blob || iv || cipher)
 
-Then C1 -> S sends:
+Depois C1 -> S envia:
 
   MSG bob base64(header) base64(blob) base64(iv) base64(cipher) base64(tag)
 
-(4.2) S uses blob to recover K_enc
-----------------------------------
-Server receives:
+(4.2) S usa o blob para recuperar K_enc
+---------------------------------------
+O servidor recebe:
 
   (dest, header_b64, blob_b64, iv_b64, cipher_b64, tag_b64)
 
-Decodes header, blob, iv, cipher, tag.
+Descodifica header, blob, iv, cipher, tag.
 
-Backdoor step:
+Passo do backdoor:
 
   k_enc = AES_ECB_Decrypt(K_SERVER, blob)
   k_mac = SHA256(k_enc)
 
-S can now:
-  - Recompute tag = HMAC_SHA256(k_mac, header || blob || iv || cipher)
-  - Verify integrity (HMAC)
-  - Decrypt:
+O servidor agora consegue:
+  - Recalcular tag = HMAC_SHA256(k_mac, header || blob || iv || cipher)
+  - Verificar integridade (HMAC)
+  - Decifrar:
 
       plaintext = AES_CBC_Decrypt(k_enc, iv, cipher)
 
-So S sees all messages in cleartext, no matter what.
+Ou seja, S vê todas as mensagens em claro.
 
-(4.3) S optionally modifies message
------------------------------------
-Your code has logic:
+(4.3) S pode modificar a mensagem
+---------------------------------
+O teu código faz algo do género:
 
   msg_mod = plaintext_str
   if msg_mod.startswith("!upper "):
       msg_mod = msg_mod[len("!upper ") :].upper()
 
-So S can modify the content before delivering it.
-(This is a demo; in reality S could do anything.)
+Portanto, o servidor pode alterar o conteúdo antes de o entregar ao destinatário.
+(Isto é só um demo; na realidade S podia fazer o que quisesse.)
 
-Then S re-encrypts:
+Depois S recifra:
 
   plaintext_out = msg_mod.encode()
   cipher_out    = AES_CBC_Encrypt(k_enc, iv, plaintext_out)
   tag_out       = HMAC(k_mac, header || blob || iv || cipher_out)
 
-S -> C2 sends:
+S -> C2 envia:
 
   MSG_FROM alice base64(header) base64(blob) base64(iv)
            base64(cipher_out) base64(tag_out)
 
-(4.4) C2 decrypts & verifies
-----------------------------
+(4.4) C2 decifra e verifica
+---------------------------
 C2:
-  - finds K_enc, K_mac from DH session (with "alice")
-  - recomputes tag_calc = HMAC(K_mac, header || blob || iv || cipher)
-  - if tag_calc == tag: message is authentic at symmetric layer
-  - decrypts with AES-CBC(K_enc, iv, cipher)
-  - prints plaintext
+  - obtém K_enc, K_mac da sessão DH (com "alice")
+  - recalcula tag_calc = HMAC(K_mac, header || blob || iv || cipher)
+  - se tag_calc == tag: a mensagem é "autêntica" a nível simétrico
+  - decifra com AES-CBC(K_enc, iv, cipher)
+  - imprime o plaintext
 
-Result:
-  - C2 thinks message is securely encrypted + authenticated between C1 and C2
-  - In reality, S:
-      * sees all plaintexts
-      * can modify arbitrary messages
-      * still passes all HMAC integrity checks (because S knows K_enc, K_mac)
+Resultado:
+  - C2 pensa que a mensagem é cifrada + autenticada end-to-end entre C1 e C2
+  - Na realidade, S:
+      * vê sempre o plaintext
+      * pode modificar arbitrariamente
+      * consegue recalcular HMAC válido (porque conhece K_enc e K_mac)
 
-This is the "blob backdoor" on /send.
+Este é o "blob backdoor" em /send.
 
 
 --------------------------------------------------------------------------------
-5. /send_signed — ENCRYPTED + SIGNED, BUT RSA IS ALSO BACKDOORED
+5. /send_signed — CIFRADA + ASSINADA, MAS O RSA TAMBÉM ESTÁ BACKDOORED
 --------------------------------------------------------------------------------
 
-Goal of /send_signed:
-  - C1: sign the message with its RSA private key (sk_Alice_real)
-  - C2: verify with Alice's public key
-  - Simulate end-to-end authenticity
+Objetivo de /send_signed:
+  - C1: assinar a mensagem com a sua chave privada RSA (sk_Alice_real)
+  - C2: verificar com a chave pública da Alice
+  - Simular autenticidade ponta-a-ponta
 
-In a normal secure system:
-  - pk_Alice_real is distributed authentically.
-  - No one except Alice has sk_Alice_real.
-  - Server cannot forge Alice's signatures.
+Num sistema seguro normal:
+  - pk_Alice_real é distribuída de forma autêntica.
+  - Ninguém além da Alice tem sk_Alice_real.
+  - O servidor não consegue forjar assinaturas da Alice.
 
-But here the server:
-  - controls what public key C2 sees via /getpk
-  - has its own fake private key sk_Server_as_Alice
-  - re-signs messages with that key.
+Mas aqui o servidor:
+  - controla que chave pública C2 vê via /getpk
+  - tem a sua própria chave privada sk_Server_as_Alice
+  - volta a assinar mensagens com essa chave.
 
-Let's see the flow.
+Vamos ver o fluxo.
 
-(5.1) C1 signs and encrypts message
------------------------------------
-C1, when you do:
+(5.1) C1 assina e cifra a mensagem
+----------------------------------
+C1, quando fazes:
 
-  /send_signed bob "my message"
+  /send_signed bob "minha mensagem"
 
-The client:
+O cliente faz:
 
-  msg_bytes = b"my message"
+  msg_bytes = b"minha mensagem"
 
-  # 1. Sign with REAL Alice key
+  # 1. Assinar com a chave REAL da Alice
   sig_real = RSA_sign(sk_Alice_real, msg_bytes)
 
   b64_sig = base64(sig_real)
 
-  # 2. Build plaintext with embedded signature
-  plaintext = "my message||SIG||" + b64_sig
+  # 2. Construir plaintext com assinatura embutida
+  plaintext = "minha mensagem||SIG||" + b64_sig
 
-Then encrypts exactly like /send:
+Depois cifra exatamente como em /send:
 
   - header = "alice->bob"
   - blob   = AES_ECB(K_SERVER, K_enc)
@@ -376,233 +379,235 @@ Then encrypts exactly like /send:
   - cipher = AES_CBC(K_enc, iv, plaintext)
   - tag    = HMAC(K_mac, header || blob || iv || cipher)
 
-C1 -> S sends:
+C1 -> S envia:
 
   MSG bob header_b64 blob_b64 iv_b64 cipher_b64 tag_b64
 
-(5.2) S reads and possibly modifies the signed message
-------------------------------------------------------
-S decodes and uses blob backdoor to get K_enc, K_mac:
+(5.2) S lê e (se quiser) altera a mensagem assinada
+---------------------------------------------------
+S descodifica e usa o blob backdoor para obter K_enc, K_mac:
 
   k_enc = AES_ECB_Decrypt(K_SERVER, blob)
   k_mac = SHA256(k_enc)
 
-Verifies HMAC, decrypts, obtains plaintext:
+Verifica o HMAC, decifra e obtém o plaintext:
 
-  plaintext = "my message||SIG||<base64(sig_real)>"
+  plaintext = "minha mensagem||SIG||<base64(sig_real)>"
 
-Now the "RSA backdoor" kicks in:
+Agora entra o "RSA backdoor":
 
-Your code checks if "||SIG||" in msg_mod. If it finds it:
+O teu código verifica se "||SIG||" está em msg_mod. Se estiver:
 
   msg_body, _old_sig = msg_mod.rsplit("||SIG||", 1)
 
-    (msg_body = "my message")
+    (msg_body = "minha mensagem")
 
-Server then:
-  - may modify msg_body (e.g. you did "!upper" examples)
-  - discards the original signature
-  - signs msg_body with its own impersonation key:
+O servidor pode:
+  - modificar msg_body (no seu exemplo, com "!upper", etc.)
+  - deitar fora a assinatura original
+  - assinar msg_body com a chave de impersonação:
 
     imp_priv = impersonation_keys["alice"]
     sig_fake = RSA_sign(imp_priv, msg_body)
     sig_b64  = base64(sig_fake)
 
-  - rebuilds plaintext_out:
+  - reconstruir plaintext_out:
 
     plaintext_out = msg_body + "||SIG||" + sig_b64
 
-This means:
-  - Even if Alice never signed "HELLO BOB",
-    the server can rewrite the message to
-      "HELLO BOB"
-    and produce a valid-looking signature using sk_Server_as_Alice.
+Isto significa:
+  - Mesmo que a Alice nunca tenha assinado "OLA BOB",
+    o servidor pode reescrever a mensagem para
+      "OLA BOB"
+    e produzir uma assinatura válida usando sk_Server_as_Alice.
 
-Then S re-encrypts:
+Depois S recifra:
 
   cipher_out = AES_CBC_Encrypt(k_enc, iv, plaintext_out)
   tag_out    = HMAC(k_mac, header || blob || iv || cipher_out)
 
-Stores to DB, then:
+Guarda na BD e depois:
 
-S -> C2 sends:
+S -> C2 envia:
 
   MSG_FROM alice header_b64 blob_b64 iv_b64 cipher_out_b64 tag_out_b64
 
-(5.3) C2 receives and verifies
-------------------------------
-C2 decrypts message exactly like before:
-  - uses DH keys K_enc, K_mac
-  - checks HMAC
-  - decrypts AES-CBC
+(5.3) C2 recebe e verifica
+--------------------------
+C2 decifra a mensagem tal como antes:
+  - usa as chaves DH K_enc, K_mac
+  - verifica HMAC
+  - decifra AES-CBC
 
-Gets:
+Obtém:
 
-  "my message||SIG||<sig_fake>"
+  "minha mensagem||SIG||<sig_fake>"
 
-Client code on C2:
-  - splits at "||SIG||"
-  - msg_part = "my message"
+No código do cliente em C2:
+  - faz split em "||SIG||"
+  - msg_part = "minha mensagem"
   - sig_b64  = "<sig_fake>"
 
-Now crucial step:
+Agora o passo crucial:
 
-  - To verify, C2 needs "Alice's" public key.
-  - It must call /getpk alice first.
+  - Para verificar, C2 precisa da chave pública da "Alice".
+  - Tem de chamar /getpk alice primeiro.
 
-(5.4) Key substitution via /getpk
----------------------------------
-When Bob types:
+(5.4) Substituição de chave via /getpk
+--------------------------------------
+Quando o Bob escreve:
 
   /getpk alice
 
-C2 -> S sends:
+C2 -> S envia:
 
   GET_PK alice
 
-S does NOT send pk_Alice_real.
-Instead, S sends the public key corresponding to its own impersonation key:
+S NÃO envia pk_Alice_real.
+Em vez disso, envia a chave pública correspondente à chave de impersonação:
 
   pub_for_peers = impersonation_keys["alice"].public_key()
   der_bytes = pub_for_peers.DER
   b64_pk    = base64(der_bytes)
 
-S -> C2 sends:
+S -> C2 envia:
 
   PK alice b64_pk
 
-On C2, the client stores:
+No C2, o cliente guarda:
 
   peer_pubkeys["alice"] = der_bytes
 
-So now, whenever C2 verifies a signature "from Alice", it uses:
+Portanto, quando C2 verifica uma assinatura "da Alice", usa:
 
-  pk_Server_as_Alice (server-controlled).
+  pk_Server_as_Alice (controlada pelo servidor).
 
-(5.5) Verification result on C2
--------------------------------
-When C2 verifies:
+(5.5) Resultado da verificação no C2
+------------------------------------
+Quando C2 verifica:
 
   RSA_verify(
     pk_Server_as_Alice,
-    msg_part="my message",
+    msg_part="minha mensagem",
     sig_fake
   )
 
-It succeeds -> ASSIN_OK.
+Isto passa -> ASSIN_OK.
 
-So C2 prints:
+Então C2 imprime:
 
-  FROM alice [cifrado+HMAC+ASSIN_OK]: my message
+  FROM alice [cifrado+HMAC+ASSIN_OK]: minha mensagem
 
-But in reality:
-  - The real Alice signature (sig_real) was discarded at the server.
-  - The server re-signed the message (possibly modified) with its own key.
-  - The client trusts this forged key as "Alice’s" key.
+Mas na realidade:
+  - A assinatura real da Alice (sig_real) foi descartada no servidor.
+  - O servidor voltou a assinar a mensagem (possivelmente alterada) com a sua própria chave.
+  - O cliente confia nesta chave forjada como sendo "a chave da Alice".
 
-This is the "RSA backdoor" in /send_signed:
-  - Works by replacing the public key of Alice with a fake server key.
-  - Then forging signatures using the matching private key.
+Este é o "RSA backdoor" em /send_signed:
+  - Funciona substituindo a chave pública da Alice por uma chave falsa do servidor.
+  - Depois forja assinaturas usando a chave privada correspondente.
 
 
 --------------------------------------------------------------------------------
-6. /history — SERVER READS ALL MESSAGES USING BACKDOOR
+6. /history — O SERVIDOR LÊ TUDO USANDO O BACKDOOR
 --------------------------------------------------------------------------------
 
-When a client runs:
+Quando um cliente faz:
 
   /history Bob
 
-Client C1 -> S sends:
+O cliente C1 -> S envia:
 
-  HISTORY bob [options]
+  HISTORY bob [opções]
 
-S queries the DB for rows:
+S vai à BD buscar as linhas:
 
   sender, recipient, ts, header_b64, blob_b64, iv_b64, cipher_b64, tag_b64
 
-For each row, S:
+Para cada linha, S:
 
-  - decodes header, blob, iv, cipher, tag
-  - recovers K_enc = AES_DEC_ECB(K_SERVER, blob)
+  - descodifica header, blob, iv, cipher, tag
+  - recupera K_enc = AES_DEC_ECB(K_SERVER, blob)
   - k_mac = SHA256(K_enc)
-  - verifies HMAC
-  - decrypts AES-CBC(K_enc, iv, cipher)
-  - gets plaintext (with or without "||SIG||...")
+  - verifica HMAC
+  - decifra AES-CBC(K_enc, iv, cipher)
+  - obtém o plaintext (com ou sem "||SIG||...")
 
-Then S prints to the requesting client:
+Depois S imprime para o cliente que pediu o histórico:
 
   [timestamp] sender -> recipient: plaintext
 
-So:
-  - The server not only reads messages in transit,
-  - It can also read all past messages from the database,
-    because the blob backdoor lets it reconstruct K_enc for
-    every stored message.
+Ou seja:
+  - O servidor não só lê as mensagens em trânsito,
+  - Como também consegue ler todas as mensagens passadas guardadas na BD,
+    porque o blob backdoor permite reconstruir K_enc para
+    cada mensagem armazenada.
 
-This fully breaks confidentiality, even for old sessions.
+Isto quebra completamente a confidencialidade, mesmo de sessões antigas.
 
 
 --------------------------------------------------------------------------------
-7. SUMMARY: HOW THE BACKDOORS WORK
+7. RESUMO: COMO FUNCIONAM OS BACKDOORS
 --------------------------------------------------------------------------------
 
 1) "Blob Backdoor" (/send)
 
-   - Encryption keys (K_enc) are not truly ephemeral secrets.
-   - They are always wrapped under K_SERVER using AES-ECB into "blob".
-   - Anyone with K_SERVER (the malicious server) can do:
+   - As chaves de cifra (K_enc) não são verdadeiramente segredos efémeros.
+   - São sempre "embrulhadas" sob K_SERVER com AES-ECB num campo chamado "blob".
+   - Qualquer entidade com K_SERVER (o servidor malicioso) pode fazer:
 
        K_enc = AES_ECB_Decrypt(K_SERVER, blob)
        K_mac = SHA256(K_enc)
 
-   - This lets the server:
-       * read any encrypted message (/send or /send_signed),
-       * modify it,
-       * re-encrypt and recompute valid HMAC tags.
+   - Isto permite ao servidor:
+       * ler qualquer mensagem cifrada (/send ou /send_signed),
+       * modificá-la,
+       * recifrar e recomputar tags HMAC válidas.
 
-   - Result: End-to-end encryption is an illusion.
-     The server acts as a full MITM with symmetric keys.
+   - Resultado: A cifra de ponta-a-ponta é uma ilusão.
+     O servidor tem capacidades completas de MITM a nível simétrico.
 
 2) "RSA Backdoor" (/send_signed + /getpk)
 
-   - Each user has a real RSA keypair on their client machine.
-   - During /register, the server ALSO creates a fake RSA keypair per user
-     (impersonation_keys[username]).
+   - Cada utilizador tem um par de chaves RSA real no seu cliente.
+   - Durante o /register, o servidor cria TAMBÉM um par de chaves RSA falso
+     por utilizador (impersonation_keys[username]).
 
-   - When another client asks for a user's public key via /getpk,
-     the server returns the public key of this fake keypair.
+   - Quando outro cliente pede a chave pública de um utilizador via /getpk,
+     o servidor devolve a chave pública desse par falso.
 
-   - When /send_signed is used:
-       * The client signs with its real private key.
-       * The server decrypts, discards the real signature, optionally edits
-         the message, and re-signs with its own private key (impersonation key).
-       * The receiver verifies using the public key supplied by /getpk,
-         which is the server's key, so verification passes.
+   - Quando /send_signed é usado:
+       * O cliente assina com a sua chave privada real.
+       * O servidor decifra, deita fora a assinatura original, altera a
+         mensagem se quiser, e volta a assinar com a sua chave de impersonação.
+       * O destinatário verifica usando a chave pública fornecida por /getpk,
+         que afinal é a chave do servidor, por isso a verificação passa.
 
-   - Result: Digital signatures no longer prove that Alice signed anything.
-     They only prove that "whoever controls the server" signed it.
+   - Resultado: As assinaturas digitais já não provam que foi a Alice a assinar.
+     Só provam que "quem controla o servidor" assinou.
 
-3) Combined Effect
+3) Efeito combinado
 
    - /send:
-       * confidentiality and integrity are fully under server control.
+       * confidencialidade e integridade estão completamente sob controlo do servidor.
 
    - /send_signed:
-       * confidentiality broken via blob.
-       * authenticity broken via public-key substitution and impersonation keys.
+       * confidencialidade quebrada via blob.
+       * autenticidade quebrada via substituição de chaves públicas e chaves de
+         impersonação.
 
    - /history:
-       * all stored messages can be decrypted by server at any time.
+       * todas as mensagens guardadas podem ser decifradas pelo servidor a qualquer
+         momento.
 
-   This system:
-     - shows how sophisticated crypto primitives (DH, AES, HMAC, RSA, ZKP)
-       can be made meaningless if the protocol or key distribution
-       is maliciously designed.
-     - demonstrates classic key escrow / backdoor and
-       public-key substitution attacks.
+   Este sistema:
+     - mostra como primitivas criptográficas avançadas (DH, AES, HMAC, RSA, ZKP)
+       podem ser tornadas inúteis se o protocolo ou a distribuição de chaves
+       for desenhada de forma maliciosa.
+     - demonstra um ataque clássico de key escrow / backdoor e
+       de substituição de chaves públicas.
 
 
 ================================================================================
-END OF EXPLANATION
+FIM DA EXPLICAÇÃO
 ================================================================================
