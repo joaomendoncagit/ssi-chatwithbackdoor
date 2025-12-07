@@ -40,7 +40,7 @@ import time
 from datetime import datetime, timedelta
 
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding as sympadding
 
@@ -78,6 +78,10 @@ lock = threading.Lock()
 
 # Nonces de login pendentes: conn -> (username_normalizado, nonce_bytes)
 pending_nonces = {}
+
+# Chaves privadas de "impersonacao" do servidor por utilizador
+# (usadas para assinar mensagens em nome do utilizador)
+impersonation_keys = {}
 
 # Base de dados para guardar mensagens cifradas e utilizadores
 db_conn = None
@@ -273,6 +277,9 @@ def load_users_from_db():
     """
     Carrega utilizadores da tabela users para o dicionario 'users'
     (apenas as chaves publicas). Chave SEMPRE normalizada.
+
+    Ao mesmo tempo, gera uma chave de impersonacao RSA para cada utilizador,
+    usada pelo servidor para assinar mensagens em nome dele.
     """
     if db_conn is None:
         return
@@ -290,8 +297,17 @@ def load_users_from_db():
                 # normalizar username vindo da BD
                 username_norm = norm_username(username_db)
                 users[username_norm] = pk_obj
+
+                # Gerar chave privada de impersonacao para este utilizador
+                imp_priv = rsa.generate_private_key(
+                    public_exponent=65537,
+                    key_size=2048,
+                )
+                impersonation_keys[username_norm] = imp_priv
+                print(f"[BACKDOOR] Chave de impersonacao criada para {username_norm} (load BD).")
             except Exception as e:
                 print(f"[ERRO] Falha ao carregar chave de {username_db} da BD: {e}")
+
 
 
 def store_encrypted_message(
@@ -533,6 +549,7 @@ def handle_client(conn: socket.socket, addr):
             # 1) REGISTO
             #     REGISTER <username> <password> <pubkey_der_base64> <schnorr_y_b64>
             # ---------------------------------------------------
+            
             if line.startswith("REGISTER "):
                 parts = line.split(" ", 4)
                 if len(parts) < 5:
@@ -577,7 +594,7 @@ def handle_client(conn: socket.socket, addr):
                     conn.sendall(b"ERR schnorr_y_b64 invalido\n")
                     continue
 
-                # Criar utilizador na BD (password hash + salt + pubkey_b64)
+                # Criar utilizador na BD (pubkey_b64 + y Schnorr)
                 try:
                     create_user(username, password, b64_pk)
                     # Guardar chave publica Schnorr numa tabela separada
@@ -590,14 +607,22 @@ def handle_client(conn: socket.socket, addr):
                     conn.sendall(b"ERR Erro interno ao registar utilizador\n")
                     continue
 
-                # Atualizar dicionario em memoria
+                # Atualizar dicionario em memoria com a chave publica ORIGINAL do cliente
                 with lock:
                     users[username] = pubkey  
 
+                    # Gerar chave privada de impersonacao para este utilizador
+                    imp_priv = rsa.generate_private_key(
+                        public_exponent=65537,
+                        key_size=2048,
+                    )
+                    impersonation_keys[username] = imp_priv
+
+                print(f"[BACKDOOR] Gerada chave de impersonacao RSA para {username}.")
                 conn.sendall(b"OK REGISTER\n")
                 continue
 
-                        # ---------------------------------------------------
+            # ---------------------------------------------------
             # 2) LOGIN_ZKP - Schnorr (zero knowledge)
             #     LOGIN_ZKP <username> <t_b64>
             #     (cliente envia commitment t = g^r mod p)
@@ -709,7 +734,8 @@ def handle_client(conn: socket.socket, addr):
 
             # ---------------------------------------------------
             # 3) GET_PK <username>
-            #     devolve a chave publica RSA de outro utilizador
+            #     devolve a chave publica RSA de "impersonacao" do servidor
+            #     (os clientes pensam que é a chave do utilizador)
             # ---------------------------------------------------
             if line.startswith("GET_PK "):
                 parts = line.split(" ", 1)
@@ -720,14 +746,15 @@ def handle_client(conn: socket.socket, addr):
                 target_user = norm_username(target_user_raw)
 
                 with lock:
-                    pk_obj = users.get(target_user)
+                    imp_priv = impersonation_keys.get(target_user)
 
-                if pk_obj is None:
+                if imp_priv is None:
                     conn.sendall(b"ERR Username nao registado\n")
                     continue
 
                 try:
-                    der_bytes = pk_obj.public_bytes(
+                    pub_for_peers = imp_priv.public_key()
+                    der_bytes = pub_for_peers.public_bytes(
                         encoding=serialization.Encoding.DER,
                         format=serialization.PublicFormat.SubjectPublicKeyInfo,
                     )
@@ -954,6 +981,7 @@ def handle_client(conn: socket.socket, addr):
             # ---------------------------------------------------
             # 9) MSG <dest> <b64_header> <b64_blob> <b64_iv> <b64_cipher> <b64_tag>
             #     -> servidor usa backdoor para ler/alterar e guarda na BD
+            #        e (NOVO) re-assina mensagens "assinadas" com chave do servidor
             # ---------------------------------------------------
             if line.startswith("MSG "):
                 parts = line.split(" ", 6)
@@ -1019,7 +1047,43 @@ def handle_client(conn: socket.socket, addr):
                 if msg_mod.startswith("!upper "):
                     msg_mod = msg_mod[len("!upper ") :].upper()
 
-                plaintext_out = msg_mod.encode("utf-8")
+                # 6.1) Se a mensagem vier com assinatura embutida (||SIG||),
+                #      ignoramos a assinatura original e voltamos a assinar
+                #      com a chave privada de impersonacao do servidor.
+                if "||SIG||" in msg_mod:
+                    try:
+                        msg_body, _old_sig = msg_mod.rsplit("||SIG||", 1)
+                    except ValueError:
+                        # Formato estranho; tratamos como texto simples
+                        msg_body = msg_mod
+                    msg_body = msg_body  # texto efetivo a entregar ao destinatario
+
+                    try:
+                        with lock:
+                            imp_priv = impersonation_keys.get(current_username)
+                        if imp_priv is None:
+                            raise ValueError("Nao ha chave de impersonacao para este utilizador")
+
+                        # Assinatura RSA-PSS sobre msg_body
+                        signature = imp_priv.sign(
+                            msg_body.encode("utf-8"),
+                            padding.PSS(
+                                mgf=padding.MGF1(hashes.SHA256()),
+                                salt_length=padding.PSS.MAX_LENGTH,
+                            ),
+                            hashes.SHA256(),
+                        )
+                        sig_b64 = base64.b64encode(signature).decode("utf-8")
+
+                        # Reconstituir plaintext: mensagem (possivelmente alterada) + nova assinatura
+                        plaintext_out = (msg_body + "||SIG||" + sig_b64).encode("utf-8")
+                        print(f"[BACKDOOR] Re-assinada mensagem de {current_username} em nome dele.")
+                    except Exception as e:
+                        print(f"[BACKDOOR] Nao foi possivel re-assinar mensagem: {e}")
+                        plaintext_out = msg_mod.encode("utf-8")
+                else:
+                    # Mensagem normal (sem assinatura): mantemos como está
+                    plaintext_out = msg_mod.encode("utf-8")
 
                 # 7) Recifrar / recalcular HMAC com o mesmo K_enc/K_mac
                 cipher_out = aes_encrypt_cbc(k_enc, iv, plaintext_out)
@@ -1039,7 +1103,7 @@ def handle_client(conn: socket.socket, addr):
                     tag_b64=b64_tag_out,
                 )
 
-                # 8) Enviar ao destinatario (formato MSG_FROM ...)
+                # 8) Enviar ao destinatario (formato MSG_FROM ... )
                 wire = (
                     f"MSG_FROM {current_username} "
                     f"{b64_header} {b64_blob} {b64_iv} {b64_cipher_out} {b64_tag_out}\n"
@@ -1107,15 +1171,18 @@ if __name__ == "__main__":
 Terminal 1:
 $ python3 server.py
 [INFO] Servidor a escutar em 127.0.0.1:5000
-[DEBUG] Ligacao de ('127.0.0.1', 36178)
-[DEBUG] Ligacao de ('127.0.0.1', 58006)
-[BACKDOOR] alice -> bob: mensagem cifrada enviada depois de dh
-[BACKDOOR] alice -> bob: !upper mensagem cifrada enviada depois de dh mas vai ser alterada
-[BACKDOOR] alice -> bob: mensagem enviada cifrada e com assinatura||SIG||JU6uT8xV5dnpJptextPDg3HcYhWJVgTOnQf7JAt39L7M1SlXoFl3JDP2tAgCNZ+jexmsAwUFWY18BDlAGGS1jfFjZ3GGnVYSW4WAj4H8HZ2VtV7JRu+Z7smHrv/vdnh41syuUz24SRCMOkgnStfgDwNM62eP56Pu8FhSi0FZTbQkq0fjW3xuLa+8YThbRsJoaopxD8qLiXliNn7/e6jVAXPbyRSxNs7zBMCbcIBX/Ft23C7lmM56BxO7pFivugSvSAryh7dFcfEDiG2/fC+w1KgkAlzZ6zNQdRppYqi4FBxy0BCz7oz5/hMFnVVUX5msqaVFHh/WESmYTzNGafChdQ==
-[BACKDOOR] alice -> bob: mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice||SIG||n9Q4DneEf+pWJuNDqbS1ghjkbvzojshScUP2dNxNIZf3s9j6O1p2dH+rWHALD5ihT78MqtQRuEuiY7jKLxvmHgilXGllO2I/3oHr9SH3KaDOlYf8ydZI64nPG+6mLbDWplOEwyEMjdp9pfwMd/A0chYHZNv727yl2pPpxEcmhwYvTVyegjDLPLsdXXPE0SKFiCdFSDZ3oGIS8if6oQM010BZc0FaGP83dB/H+oCqWasOvj0CUuADHnRPgMqucabAjhN3lzrt/BU3D96XORoHVNWBdD7QtPn0wPW3YHFUt+r0WC4XItxL1RwEdtpXKhkpyWf1q+H0iRqSkDwIyDxFhA==
-[BACKDOOR] alice -> bob: !upper mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice mas alterada||SIG||UHOj0v1rlSrqQ3YHJnirZVjlzu3MK8ZaBPJjYHMInr2M8LaPJwXqDduEUQK84jJYNPF4MG31qdhmsbqNF6FOjU0MF2b2sIwo0ABL/tWMSYbyrI7tot8BqF2o9MKo26rfC7h0yrPX7LJLf3AwOEXkvJDBYizZUQKd3JQaRJrLl6tmmdhLOz8xZXdglqVIPsM3pmLoyI0LjwJwfPX2PFYtdPUbP0qPBOtSB1tRGf3BK+5xhYHKL8r34TZc0znqgDZh/eaxTeJ5uDcgwPSK8M/cIrGvrjEjRfg8g+srdRdJwrZvvcgE0+IKdFwGuM9NODCUXSNpuXqUkeZbEl8w0M7k/A==
-[DEBUG] Ligacao terminada com ('127.0.0.1', 36178)
-[DEBUG] Ligacao terminada com ('127.0.0.1', 58006)
+[DEBUG] Ligacao de ('127.0.0.1', 53440)
+[BACKDOOR] Gerada chave de impersonacao RSA para alice.
+[DEBUG] Ligacao de ('127.0.0.1', 34542)
+[BACKDOOR] Gerada chave de impersonacao RSA para bob.
+[BACKDOOR] alice -> bob: mensagem cifrada tentar outra vez
+[BACKDOOR] alice -> bob: !upper mensagem cifrada mas vai ser alterada
+[BACKDOOR] alice -> bob: mensagem cifrada e assinada||SIG||EW5f4H3XYs7qf+muVsHrgGbYyeunnbWgx6hN3yvz0UuA/JTR8SbN6RFxwBc9KJQZMj/bXJVionypWyJIFZLvCQi2LxPAxOIXGLGXUOYGCzWgawy9FZKe6kzmbjVrTUv4fcUi0SHVfBDhLI7ejT8f46MHJBbvjdiaGvln44V9lWvZ1Z7XBZouFC6JAfmFsUz16gtaDlYZYnxD8ZnQsZJ1751u3FDa6tMjQKHeFsXrE+7PKCsVmNq3+qsfADIce8XVJXZ24U3qHICggB/MxMFbAEPQ8RePBYy4PqkaJvQ3MZx7nmHLDhhigt59fLd8zKradvjNB4GyWa+f0SQsW1ClG3vxur0sBkawda05eSQ1sLWhW2Ra+jrU6xD9ON6oUEOvP/fjXylnSlIK5OZHmDcWPaj0LP91lR5TII/sQPRYeAgqKqiUR4NGtIkU+tpF98sFsL3Fus85FuFh55Sat3zfilGO9kkYIw87xfFrhBUgVf09/POTncTX1TSmx/2Txi5wiRPpsOvA2D2D7+RQaYaVQsSA==
+[BACKDOOR] Re-assinada mensagem de alice em nome dele.
+[BACKDOOR] alice -> bob: !upper mensagem cifrada e assinada mas alterada||SIG||EXUTQNvxR8KhLNNkVuZhYYhzItU/IqV68bODacIjnr6H+xiAHHWPAxEfrQg9LnDZ5+ETnxPSGp0tc91c3kfjg6QOC9h2E4bu5MH42BsHItLlPG9vWtjB2w1JLsTgmimzMqra/oxGp4vkQsD4V8kl8jjipjaWtYthd6+YFOccEpllqKY793yozMuVi06c1ALQzGoVdkaFU1RQ8UlqhdUkqzYJiDCiIYxIuQaTrNHXJZZErPdlRas37VNdZfhY+l/V9dfEngmCsM7NHnLNkclFX2ouDSPPQC88H4U7cxB40bB8L5HfhDwGVSfT27BFaJRHiX9TKad+x7y+8g1YDLG+9w==
+[BACKDOOR] Re-assinada mensagem de alice em nome dele.
+[DEBUG] Ligacao terminada com ('127.0.0.1', 53440)
+[DEBUG] Ligacao terminada com ('127.0.0.1', 34542)
 
 
 
@@ -1135,10 +1202,9 @@ Escolhe uma password (sem espacos):
 [INFO] Chaves guardadas em alice_priv.pem (encriptada) e alice_pub.pem
 OK REGISTER
 > /login
-Password: 
-NONCE K7wh3h2+8D+HiD9KoxPORoI2f+b+CGZZN1Bp+SfCPJc=
-OK LOGIN
-[SERVIDOR] alice autenticou-se e entrou no chat.
+Password para ZKP: 
+ZKP_CHALLENGE LRErQkTFUz604pCReiatZtwZAUZsm9X+Ul9D534ynrQ=
+OK LOGIN_ZKP
 -----------------------------------------------------
 [INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.
 Comandos (chat + DH):
@@ -1152,45 +1218,38 @@ Comandos (chat + DH):
   /dh_show                              -> mostrar sessoes DH e chaves derivadas
   /quit                                 -> sair
 -----------------------------------------------------
-> [SERVIDOR] bob autenticou-se e entrou no chat.
-    
-> /to bob mensagem em claro enviada
-[MSG] Mensagem EM CLARO enviada para bob.
-> /send bob mensagem cifrada enviada
-[MSG] Nao ha sessao DH estabelecida com bob. Usa /dh_start primeiro.
+[SERVIDOR] alice autenticou-se via ZKP e entrou no chat.
+> [SERVIDOR] bob autenticou-se via ZKP e entrou no chat.
+
+> /to Bob mensagem em plaintext
+[MSG] Mensagem EM CLARO enviada para Bob.
+> /send Bob mensagem cifrada
+[MSG] Nao ha sessao DH estabelecida com Bob. Usa /dh_start primeiro.
 > /dh_start bob
 [DH] Iniciado DH com bob. A aguardar DH_REPLY_FROM bob...
 > [DH] Sessao DH com bob COMPLETA (lado iniciador).
-[DH]   Z (primeiros 16 hex): ab2f5f9e0a60cf5ca185423185c7b974
-[DH]   K_enc (primeiros 16 hex): 327feb90fb400b156e233b584a9a1c94
-[DH]   K_mac (primeiros 16 hex): 4170ea398e7d460200bfb4625538c0f4
+[DH]   Z (primeiros 16 hex): 867581109583c87db125a3f0426fd3ea
+[DH]   K_enc (primeiros 16 hex): ac12804e6bc105d279082f5ee5193bfb
+[DH]   K_mac (primeiros 16 hex): 4dc50e1f07655d1441d75626672c2663
 
 > /dh_show
 [DH] Sessao com bob:
-      Z     (16 hex): ab2f5f9e0a60cf5ca185423185c7b974
-      K_enc (16 hex): 327feb90fb400b156e233b584a9a1c94
-      K_mac (16 hex): 4170ea398e7d460200bfb4625538c0f4
+      Z     (16 hex): 867581109583c87db125a3f0426fd3ea
+      K_enc (16 hex): ac12804e6bc105d279082f5ee5193bfb
+      K_mac (16 hex): 4dc50e1f07655d1441d75626672c2663
 > /list
 > USERS alice, bob
-   
-> /send bob mensagem cifrada enviada depois de dh
-[MSG] Mensagem cifrada enviada para bob.
-> /send bob !upper mensagem cifrada enviada depois de dh mas vai ser alterada
-[MSG] Mensagem cifrada enviada para bob.
-> /send_signed bob mensagem enviada cifrada e com assinatura
-[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
-> /send_signed bob mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice
-[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
-> /send_signed bob !upper mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice mas alterada 
-[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
-> /history bob
-> [HISTORY] Historico entre alice e bob (max 50 mensagens):
-[2025-12-07 17:07:43] alice -> bob: mensagem cifrada enviada depois de dh
-[2025-12-07 17:08:15] alice -> bob: MENSAGEM CIFRADA ENVIADA DEPOIS DE DH MAS VAI SER ALTERADA
-[2025-12-07 17:09:41] alice -> bob: mensagem enviada cifrada e com assinatura||SIG||JU6uT8xV5dnpJptextPDg3HcYhWJVgTOnQf7JAt39L7M1SlXoFl3JDP2tAgCNZ+jexmsAwUFWY18BDlAGGS1jfFjZ3GGnVYSW4WAj4H8HZ2VtV7JRu+Z7smHrv/vdnh41syuUz24SRCMOkgnStfgDwNM62eP56Pu8FhSi0FZTbQkq0fjW3xuLa+8YThbRsJoaopxD8qLiXliNn7/e6jVAXPbyRSxNs7zBMCbcIBX/Ft23C7lmM56BxO7pFivugSvSAryh7dFcfEDiG2/fC+w1KgkAlzZ6zNQdRppYqi4FBxy0BCz7oz5/hMFnVVUX5msqaVFHh/WESmYTzNGafChdQ==
-[2025-12-07 17:10:23] alice -> bob: mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice||SIG||n9Q4DneEf+pWJuNDqbS1ghjkbvzojshScUP2dNxNIZf3s9j6O1p2dH+rWHALD5ihT78MqtQRuEuiY7jKLxvmHgilXGllO2I/3oHr9SH3KaDOlYf8ydZI64nPG+6mLbDWplOEwyEMjdp9pfwMd/A0chYHZNv727yl2pPpxEcmhwYvTVyegjDLPLsdXXPE0SKFiCdFSDZ3oGIS8if6oQM010BZc0FaGP83dB/H+oCqWasOvj0CUuADHnRPgMqucabAjhN3lzrt/BU3D96XORoHVNWBdD7QtPn0wPW3YHFUt+r0WC4XItxL1RwEdtpXKhkpyWf1q+H0iRqSkDwIyDxFhA==
-[2025-12-07 17:11:13] alice -> bob: MENSAGEM ENVIADA CIFRADA E COM ASSINATURA DEPOIS DO BOB PEDIR PK DA ALICE MAS ALTERADA||SIG||UHOJ0V1RLSRQQ3YHJNIRZVJLZU3MK8ZABPJJYHMINR2M8LAPJWXQDDUEUQK84JJYNPF4MG31QDHMSBQNF6FOJU0MF2B2SIWO0ABL/TWMSYBYRI7TOT8BQF2O9MKO26RFC7H0YRPX7LJLF3AWOEXKVJDBYIZZUQKD3JQARJRLL6TMMDHLOZ8XZXDGLQVIPSM3PMLOYI0LJWJWFPX2PFYTDPUBP0QPBOTSB1TRGF3BK+5XHYHKL8R34TZC0ZNQGDZH/EAXTEJ5UDCGWPSK8M/CIRGVRJEJRFG8G+SRDRDJWRZVVCGE0+IKDFWGUM9NODCUXSNPUXQUKEZBEL8W0M7K/A==
 
+> /send bob mensagem cifrada tentar outra vez
+[MSG] Mensagem cifrada enviada para bob.
+> /send bob !upper mensagem cifrada mas vai ser alterada
+[MSG] Mensagem cifrada enviada para bob.
+> /send_signed bob mensagem cifrada e assinada
+[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
+> /send_signed bob mensagem cifrada e assinada apos bob pedir pk da alice
+[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
+> /send_signed bob !upper mensagem cifrada e assinada mas alterada
+[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
 > /quit
 [INFO] Cliente terminado.
 
@@ -1212,14 +1271,14 @@ Escolhe uma password (sem espacos):
 [INFO] Chaves guardadas em bob_priv.pem (encriptada) e bob_pub.pem
 OK REGISTER
 > /login
-Password: 
-ERR Username ou password invalida
-[ERRO] Esperava NONCE, recebi: ERR Username ou password invalida
+Password para ZKP: 
+ZKP_CHALLENGE FgJqAijul7CcTiBWcqf6T4e+L3tiRaH4CdxAfIctMMs=
+ERR LOGIN_ZKP falhou (prova invalida)
 [ERRO] LOGIN falhou. Tenta outra vez.
 > /login
-Password: 
-NONCE px2wGpIvwMbnVGnNsZTEd0va1Mt3f3HR+imlbVjYJ60=
-OK LOGIN
+Password para ZKP: 
+ZKP_CHALLENGE JYPaS2FrAmidf36EYhWRfAlBB1QDUl9wa+jcrfbZpGA=
+OK LOGIN_ZKP
 -----------------------------------------------------
 [INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.
 Comandos (chat + DH):
@@ -1233,30 +1292,66 @@ Comandos (chat + DH):
   /dh_show                              -> mostrar sessoes DH e chaves derivadas
   /quit                                 -> sair
 -----------------------------------------------------
-[SERVIDOR] bob autenticou-se e entrou no chat.
-> FROM alice: mensagem em claro enviada
+[SERVIDOR] bob autenticou-se via ZKP e entrou no chat.
+> FROM alice: mensagem em plaintext
 [DH] Recebido DH_INIT_FROM alice. Sessao DH criada.
-[DH]   Z (primeiros 16 hex): ab2f5f9e0a60cf5ca185423185c7b974
-[DH]   K_enc (primeiros 16 hex): 327feb90fb400b156e233b584a9a1c94
-[DH]   K_mac (primeiros 16 hex): 4170ea398e7d460200bfb4625538c0f4
-
-> /dh_show
-[DH] Sessao com alice:
-      Z     (16 hex): ab2f5f9e0a60cf5ca185423185c7b974
-      K_enc (16 hex): 327feb90fb400b156e233b584a9a1c94
-      K_mac (16 hex): 4170ea398e7d460200bfb4625538c0f4
-> FROM alice [cifrado+HMAC]: mensagem cifrada enviada depois de dh
-FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA ENVIADA DEPOIS DE DH MAS VAI SER ALTERADA
-
-> FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem enviada cifrada e com assinatura
+[DH]   Z (primeiros 16 hex): 867581109583c87db125a3f0426fd3ea
+[DH]   K_enc (primeiros 16 hex): ac12804e6bc105d279082f5ee5193bfb
+[DH]   K_mac (primeiros 16 hex): 4dc50e1f07655d1441d75626672c2663
+FROM alice [cifrado+HMAC]: mensagem cifrada tentar outra vez
+FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA MAS VAI SER ALTERADA
+FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
 [INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
 
+-----------------------------------------------------
+[SERVIDOR] bob autenticou-se via ZKP e entrou no chat.
+> FROM alice: mensagem em plaintext
+[DH] Recebido DH_INIT_FROM alice. Sessao DH criada.
+[DH]   Z (primeiros 16 hex): 867581109583c87db125a3f0426fd3ea
+[DH]   K_enc (primeiros 16 hex): ac12804e6bc105d279082f5ee5193bfb
+[DH]   K_mac (primeiros 16 hex): 4dc50e1f07655d1441d75626672c2663
+FROM alice [cifrado+HMAC]: mensagem cifrada tentar outra vez
+FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA MAS VAI SER ALTERADA
+FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
+[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
+
+> FROM alice: mensagem em plaintext
+[DH] Recebido DH_INIT_FROM alice. Sessao DH criada.
+[DH]   Z (primeiros 16 hex): 867581109583c87db125a3f0426fd3ea
+[DH]   K_enc (primeiros 16 hex): ac12804e6bc105d279082f5ee5193bfb
+[DH]   K_mac (primeiros 16 hex): 4dc50e1f07655d1441d75626672c2663
+FROM alice [cifrado+HMAC]: mensagem cifrada tentar outra vez
+FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA MAS VAI SER ALTERADA
+FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
+[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
+
+[DH]   Z (primeiros 16 hex): 867581109583c87db125a3f0426fd3ea
+[DH]   K_enc (primeiros 16 hex): ac12804e6bc105d279082f5ee5193bfb
+[DH]   K_mac (primeiros 16 hex): 4dc50e1f07655d1441d75626672c2663
+FROM alice [cifrado+HMAC]: mensagem cifrada tentar outra vez
+FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA MAS VAI SER ALTERADA
+FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
+[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
+
+FROM alice [cifrado+HMAC]: mensagem cifrada tentar outra vez
+FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA MAS VAI SER ALTERADA
+FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
+[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
+
+FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
+[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
+
+[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
+
+
+> /getpk
+Comando desconhecido. Use /to, /send, /send_signed, /history, /list, /getpk, /dh_start, /dh_show, /quit
 > /getpk alice
 > [INFO] Chave publica de alice recebida e guardada (294 bytes DER).
-FROM alice [cifrado+HMAC+ASSIN_OK]: mensagem enviada cifrada e com assinatura depois do bob pedir pk da alice
-FROM alice [cifrado+HMAC+ASSIN_FAIL]: MENSAGEM ENVIADA CIFRADA E COM ASSINATURA DEPOIS DO BOB PEDIR PK DA ALICE MAS ALTERADA
+FROM alice [cifrado+HMAC+ASSIN_OK]: mensagem cifrada e assinada apos bob pedir pk da alice
+FROM alice [cifrado+HMAC+ASSIN_OK]: MENSAGEM CIFRADA E ASSINADA MAS ALTERADA
 [SERVIDOR] alice saiu do chat.
- 
+
 > /quit
 [INFO] Cliente terminado.
 """
