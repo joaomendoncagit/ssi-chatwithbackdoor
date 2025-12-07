@@ -123,9 +123,7 @@ def hmac_sha256(key: bytes, data: bytes) -> bytes:
     return hmac.new(key, data, hashlib.sha256).digest()
 
 
-# ---------------------------------------------------------------
 # GESTAO DE CHAVES RSA NO CLIENTE
-# ---------------------------------------------------------------
 def get_key_filenames(username: str):
     """
     Retorna o nome dos ficheiros de chaves RSA para um utilizador.
@@ -725,7 +723,7 @@ def perform_login_zkp(sock: socket.socket, username: str, password: str):
     if not resp.startswith("OK LOGIN_ZKP"):
         return False
 
-    # Se chegou aqui, login ZKP passou -> desencriptar chave RSA localmente
+    # Se chegou aqui, o login ZKP passou -> desencriptar chave RSA localmente
     try:
         private_key = load_private_key(username, password)
     except Exception:
@@ -914,7 +912,6 @@ def send_signed_message(sock: socket.socket, my_username: str, dest: str, msg_st
     )
     b64_sig = base64.b64encode(signature).decode("utf-8")
 
-    # Nota: evitar "||SIG||" literalmente no texto da mensagem.
     plaintext = (msg_str + "||SIG||" + b64_sig).encode("utf-8")
 
     b64_header, b64_blob, b64_iv, b64_cipher, b64_tag = build_cipher_packet(
@@ -929,9 +926,7 @@ def send_signed_message(sock: socket.socket, my_username: str, dest: str, msg_st
         print(f"[ERRO] Nao foi possivel enviar MSG assinada: {e}")
 
 
-# ---------------------------------------------------------------
-# MAIN CLIENT
-# ---------------------------------------------------------------
+# Main Cliente 
 def main():
     """
     Fluxo principal:
@@ -948,7 +943,6 @@ def main():
         print(f"[ERRO] Nao foi possivel ligar ao servidor: {e}")
         return
 
-    # Mensagem de boas-vindas do servidor
     data = sock.recv(4096)
     if data:
         print(data.decode("utf-8", errors="ignore"), end="")

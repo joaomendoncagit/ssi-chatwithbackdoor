@@ -1,33 +1,34 @@
-# ===============================================================
-# CHATWITHBACKDOOR - SERVIDOR (BACKDOOR + HMAC + BLOB + DB + USERS)
-# ===============================================================
-# Funcionalidades:
-#   - Registo de utilizadores com:
-#       username, password (hash+salt), chave publica RSA (DER base64)
-#   - Autenticacao forte:
-#       1) LOGIN <username> <password>
-#       2) Servidor responde com NONCE <b64>
-#       3) Cliente envia LOGIN_SIG <username> <signature_base64>
-#          (assinatura digital do nonce com RSA-PSS)
-#   - Diretoria de chaves publicas: GET_PK
-#   - DH efémero + encaminhamento de mensagens cifradas (MSG) com backdoor
-#   - Encaminhamento de mensagens em claro (TO) [debug]
-#   - Base de dados SQLite (chat.db):
-#       Tabela users:
-#         username, password_hash, salt, pubkey_b64
-#       Tabela messages:
-#         sender, recipient, ts_unix,
-#         header_b64, blob_b64, iv_b64, cipher_b64, tag_b64
-#   - HISTORY dest [-d YYYY-MM-DD|--date YYYY-MM-DD] [-c N|--count N]
-#       usa backdoor para decifrar histórico da BD
-#
-#   Backdoor (versao com blob, alinhada com o enunciado/diagrama):
-#       blob   = AES-ECB_Encrypt(K_SERVER, K_enc)
-#       IV     = primeiros 16 bytes de blob   (como K_enc tem 16 bytes, blob == IV)
-#       K_enc  = AES-ECB_Decrypt(K_SERVER, blob)
-#       K_mac  = SHA256(K_enc)
-#       tag    = HMAC_SHA256(K_mac, header || blob || IV || C)
-# ===============================================================
+"""
+ CHATWITHBACKDOOR - Servidor
+ ============================
+
+ Funcionalidades Principais:
+   - Registo de utilizadores com:
+       username, password (hash+salt), chave publica RSA (DER base64)
+   - Autenticacao forte:
+       1) LOGIN <username> <password>
+       2) Servidor responde com NONCE <b64>
+       3) Cliente envia LOGIN_SIG <username> <signature_base64>
+          (assinatura digital do nonce com RSA-PSS)
+   - Diretoria de chaves publicas: GET_PK
+   - DH efémero + encaminhamento de mensagens cifradas (MSG) com backdoor
+   - Encaminhamento de mensagens em texto limpo
+   - Base de dados SQLite (chat.db):
+       Tabela users:
+         username, password_hash, salt, pubkey_b64
+       Tabela messages:
+         sender, recipient, ts_unix,
+         header_b64, blob_b64, iv_b64, cipher_b64, tag_b64
+   - HISTORY dest [-d YYYY-MM-DD|--date YYYY-MM-DD] [-c N|--count N]
+       usa backdoor para decifrar histórico da BD
+
+   Backdoor (versao com blob, alinhada com o enunciado/diagrama):
+       blob   = AES-ECB_Encrypt(K_SERVER, K_enc)
+       IV     = primeiros 16 bytes de blob   (como K_enc tem 16 bytes, blob == IV)
+       K_enc  = AES-ECB_Decrypt(K_SERVER, blob)
+       K_mac  = SHA256(K_enc)
+       tag    = HMAC_SHA256(K_mac, header || blob || IV || C)
+"""
 
 import socket
 import threading
@@ -91,11 +92,13 @@ db_lock = threading.Lock()
 # ---------------------------------------------------
 # NORMALIZACAO DE USERNAMES 
 # ---------------------------------------------------
-# O servidor passa a tratar todos os usernames de forma case-insensitive.
-# Por exemplo, "Alice", "alice" e "ALICE" são sempre o mesmo utilizador.
-# Tudo é guardado e consultado em lowercase.
 def norm_username(u: str) -> str:
-    """Normaliza usernames para ser tudo case-insensitive."""
+    """
+    Normaliza os usernames para lowercase (case-insensitive).
+    
+    Input: u (str) - username original
+    Output: str - username em lowercase
+    """
     return u.strip().lower()
 
 
@@ -175,9 +178,12 @@ def hmac_sha256(key: bytes, data: bytes) -> bytes:
 # ---------------------------------------------------
 def hash_password(password: str, salt: bytes) -> str:
     """
-    Hash simples de password com salt:
-      hash = SHA256(salt || password)
-    Guardado em hex na BD.
+    Calcula hash da password com salt e com SHA256.
+    
+    Input: password (str), salt (bytes)
+    Output: str - hash em hexadecimal
+    
+    Hash = SHA256(salt || password)
     """
     pw_bytes = password.encode("utf-8")
     return hashlib.sha256(salt + pw_bytes).hexdigest()
@@ -187,7 +193,12 @@ def hash_password(password: str, salt: bytes) -> str:
 # RSA
 # ---------------------------------------------------
 def load_public_key_from_der(der_bytes: bytes):
-    # Converte bytes DER numa chave publica RSA (objeto cryptography)
+    """
+    Carrega a chave pública RSA de bytes DER.
+    
+    Input: der_bytes (bytes) - chave em formato DER
+    Output: RSAPublicKey object
+    """
     return serialization.load_der_public_key(der_bytes)
 
 
@@ -222,8 +233,15 @@ def verify_signature(pubkey, nonce: bytes, signature: bytes) -> bool:
 # ---------------------------------------------------
 def init_db(db_path: str = "chat.db"):
     """
-    Inicializa a base de dados SQLite (se nao existir, cria).
-    Guarda utilizadores e mensagens cifradas.
+    Inicializa a base de dados SQLite com as tabelas necessárias.
+    
+    Input: db_path (str) - caminho do ficheiro SQLite
+    Output: None (cria/abre BD e tabelas)
+    
+    Tabelas criadas:
+      - users: username, pubkey_b64
+      - messages: sender, recipient, ts_unix, header_b64, blob_b64, iv_b64, cipher_b64, tag_b64
+      - schnorr_users: username, y_b64
     """
     global db_conn
     db_conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -275,11 +293,14 @@ def init_db(db_path: str = "chat.db"):
 
 def load_users_from_db():
     """
-    Carrega utilizadores da tabela users para o dicionario 'users'
-    (apenas as chaves publicas). Chave SEMPRE normalizada.
-
-    Ao mesmo tempo, gera uma chave de impersonacao RSA para cada utilizador,
-    usada pelo servidor para assinar mensagens em nome dele.
+    Carrega utilizadores da BD para memória e gera chaves para impersonação.
+    
+    Input: None (lê de db_conn global)
+    Output: None (popula dicionários 'users' e 'impersonation_keys')
+    
+    Para cada utilizador:
+      - Carrega chave pública RSA original
+      - Gera chave privada RSA de impersonação (backdoor)
     """
     if db_conn is None:
         return
@@ -320,10 +341,21 @@ def store_encrypted_message(
     tag_b64: str,
 ):
     """
-    Guarda uma mensagem cifrada na base de dados.
+    Guarda a mensagem cifrada na base de dados.
+    
+    Input:
+      - sender (str): remetente (normalizado)
+      - recipient (str): destinatário (normalizado)
+      - header_b64 (str): cabeçalho em base64
+      - blob_b64 (str): blob (backdoor) em base64
+      - iv_b64 (str): IV em base64
+      - cipher_b64 (str): ciphertext em base64
+      - tag_b64 (str): HMAC tag em base64
+    
+    Output: None (insere na tabela 'messages')
     """
     if db_conn is None:
-        return  # DB nao inicializada
+        return
 
     ts = int(time.time())
     sender_norm = norm_username(sender)
@@ -351,9 +383,18 @@ def fetch_history(
     limit: int = 50,
 ):
     """
-    Vai buscar as ultimas 'limit' mensagens entre user1 e user2 (case-insensitive).
-    Se date_str for fornecido (YYYY-MM-DD), filtra por esse dia.
-    Devolve lista ordenada cronologicamente (do mais antigo para o mais recente).
+    Obtém o histórico de mensagens entre dois utilizadores.
+    
+    Input:
+      - user1 (str): primeiro utilizador
+      - user2 (str): segundo utilizador
+      - date_str (str | None): filtro de data no formato YYYY-MM-DD
+      - limit (int): número máximo de mensagens
+    
+    Output: list - lista de tuplas (sender, recipient, ts_unix, header_b64, blob_b64, iv_b64, cipher_b64, tag_b64)
+            ou None se date_str for inválida
+    
+    Mensagens ordenadas cronologicamente (mais antigas primeiro).
     """
     if db_conn is None:
         return []
@@ -400,8 +441,10 @@ def fetch_history(
 
 def fetch_user_record(username: str):
     """
-    Vai buscar (password_hash, salt, pubkey_b64) de um utilizador (case-insensitive),
-    ou None se nao existir.
+    Obtém registo de utilizador da base de dados.
+    
+    Input: username (str) - username (será normalizado)
+    Output: tuple (pubkey_b64,) ou None se não existir
     """
     if db_conn is None:
         return None
@@ -421,9 +464,16 @@ def fetch_user_record(username: str):
 
 def create_user(username: str, password: str, pubkey_b64: str):
     """
-    Cria utilizador na BD com password hash + salt e pubkey_b64.
-    Levanta sqlite3.IntegrityError se username ja existir (UNIQUE).
-    username é guardado normalizado (lowercase).
+    Cria um novo utilizador na base de dados.
+    
+    Input:
+      - username (str): username (será normalizado para lowercase)
+      - password (str): password em texto claro (guardado como hash)
+      - pubkey_b64 (str): chave pública RSA em DER base64
+    
+    Output: None (insere na tabela 'users')
+    
+    Raises: sqlite3.IntegrityError se username já existir
     """
     if db_conn is None:
         raise RuntimeError("BD nao inicializada")
@@ -443,7 +493,13 @@ def create_user(username: str, password: str, pubkey_b64: str):
 
 def store_schnorr_pub(username: str, y_b64: str):
     """
-    Guarda a chave publica Schnorr (y) para um utilizador.
+    Guarda a chave pública Schnorr (y) de um utilizador.
+    
+    Input:
+      - username (str): username (será normalizado)
+      - y_b64 (str): y = g^x mod p em base64
+    
+    Output: None (insere/atualiza na tabela 'schnorr_users')
     """
     if db_conn is None:
         raise RuntimeError("BD nao inicializada")
@@ -465,8 +521,10 @@ def store_schnorr_pub(username: str, y_b64: str):
 
 def fetch_schnorr_pub(username: str) -> str | None:
     """
-    Vai buscar a chave publica Schnorr (y_b64) de um utilizador
-    ou None se nao existir.
+    Obtém a chave pública Schnorr de um utilizador.
+    
+    Input: username (str) - username (será normalizado)
+    Output: str (y_b64) ou None se não existir
     """
     if db_conn is None:
         return None
@@ -520,7 +578,7 @@ def handle_client(conn: socket.socket, addr):
       - LOGIN / LOGIN_SIG: autenticação
       - GET_PK: obter chave pública de utilizador
       - DH_INIT / DH_REPLY: encaminhar trocas DH
-      - TO: mensagem em claro
+      - TO: mensagem em texto limp
       - MSG: mensagem cifrada (com backdoor)
       - LIST: listar utilizadores online
       - QUIT: desconectar
@@ -541,10 +599,6 @@ def handle_client(conn: socket.socket, addr):
             if not line:
                 continue
 
-            # ---------------------------------------------------
-            # 1) REGISTO
-            #     REGISTER <username> <password> <pubkey_der_base64>
-            # ---------------------------------------------------
             # ---------------------------------------------------
             # 1) REGISTO
             #     REGISTER <username> <password> <pubkey_der_base64> <schnorr_y_b64>
@@ -952,9 +1006,6 @@ def handle_client(conn: socket.socket, addr):
 
                 continue
 
-            # ---------------------------------------------------
-            # 8) TO <dest> <mensagem>  (modo antigo, em claro)
-            # ---------------------------------------------------
             if line.startswith("TO "):
                 parts = line.split(" ", 2)
                 if len(parts) < 3:
@@ -1146,6 +1197,15 @@ def handle_client(conn: socket.socket, addr):
 
 
 def main():
+    """
+    Função principal do servidor.
+    
+    Input: None
+    Output: None (loop infinito)
+    
+    Inicializa BD e aceita conexões TCP em loop,
+    criando thread por cliente.
+    """
     print(f"[INFO] Servidor a escutar em {HOST}:{PORT}")
 
     # Inicializar base de dados (cria ficheiro chat.db se nao existir)
@@ -1165,193 +1225,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-"""
-Terminal 1:
-$ python3 server.py
-[INFO] Servidor a escutar em 127.0.0.1:5000
-[DEBUG] Ligacao de ('127.0.0.1', 53440)
-[BACKDOOR] Gerada chave de impersonacao RSA para alice.
-[DEBUG] Ligacao de ('127.0.0.1', 34542)
-[BACKDOOR] Gerada chave de impersonacao RSA para bob.
-[BACKDOOR] alice -> bob: mensagem cifrada tentar outra vez
-[BACKDOOR] alice -> bob: !upper mensagem cifrada mas vai ser alterada
-[BACKDOOR] alice -> bob: mensagem cifrada e assinada||SIG||EW5f4H3XYs7qf+muVsHrgGbYyeunnbWgx6hN3yvz0UuA/JTR8SbN6RFxwBc9KJQZMj/bXJVionypWyJIFZLvCQi2LxPAxOIXGLGXUOYGCzWgawy9FZKe6kzmbjVrTUv4fcUi0SHVfBDhLI7ejT8f46MHJBbvjdiaGvln44V9lWvZ1Z7XBZouFC6JAfmFsUz16gtaDlYZYnxD8ZnQsZJ1751u3FDa6tMjQKHeFsXrE+7PKCsVmNq3+qsfADIce8XVJXZ24U3qHICggB/MxMFbAEPQ8RePBYy4PqkaJvQ3MZx7nmHLDhhigt59fLd8zKradvjNB4GyWa+f0SQsW1ClG3vxur0sBkawda05eSQ1sLWhW2Ra+jrU6xD9ON6oUEOvP/fjXylnSlIK5OZHmDcWPaj0LP91lR5TII/sQPRYeAgqKqiUR4NGtIkU+tpF98sFsL3Fus85FuFh55Sat3zfilGO9kkYIw87xfFrhBUgVf09/POTncTX1TSmx/2Txi5wiRPpsOvA2D2D7+RQaYaVQsSA==
-[BACKDOOR] Re-assinada mensagem de alice em nome dele.
-[BACKDOOR] alice -> bob: !upper mensagem cifrada e assinada mas alterada||SIG||EXUTQNvxR8KhLNNkVuZhYYhzItU/IqV68bODacIjnr6H+xiAHHWPAxEfrQg9LnDZ5+ETnxPSGp0tc91c3kfjg6QOC9h2E4bu5MH42BsHItLlPG9vWtjB2w1JLsTgmimzMqra/oxGp4vkQsD4V8kl8jjipjaWtYthd6+YFOccEpllqKY793yozMuVi06c1ALQzGoVdkaFU1RQ8UlqhdUkqzYJiDCiIYxIuQaTrNHXJZZErPdlRas37VNdZfhY+l/V9dfEngmCsM7NHnLNkclFX2ouDSPPQC88H4U7cxB40bB8L5HfhDwGVSfT27BFaJRHiX9TKad+x7y+8g1YDLG+9w==
-[BACKDOOR] Re-assinada mensagem de alice em nome dele.
-[DEBUG] Ligacao terminada com ('127.0.0.1', 53440)
-[DEBUG] Ligacao terminada com ('127.0.0.1', 34542)
-
-
-
-Terminal 2:
-$ python3 client.py
-[INFO] A ligar ao servidor em 127.0.0.1:5000...
-OK Ligado ao ChatWithBackdoor v4.0. Use REGISTER ou LOGIN.
-Escolhe um username (identidade local): alice
-Comandos (antes do LOGIN):
-  /register  -> registar username + password + chave publica no servidor
-  /login     -> autenticar com username + password + assinatura de nonce
-  /quit      -> sair
------------------------------------------------------
-> /register
-Escolhe uma password (sem espacos): 
-[INFO] A gerar par de chaves RSA para 'alice'...
-[INFO] Chaves guardadas em alice_priv.pem (encriptada) e alice_pub.pem
-OK REGISTER
-> /login
-Password para ZKP: 
-ZKP_CHALLENGE LRErQkTFUz604pCReiatZtwZAUZsm9X+Ul9D534ynrQ=
-OK LOGIN_ZKP
------------------------------------------------------
-[INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.
-Comandos (chat + DH):
-  /to <dest> <mensagem>                 -> enviar EM CLARO (SEM segurança)
-  /send <dest> <mensagem>               -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
-  /send_signed <dest> <mensagem>        -> enviar mensagem CIFRADA + ASSINADA digitalmente
-  /history <user> [opcoes]              -> historico (ex: -d 2024-12-06, -c 10, ...)
-  /list                                 -> listar utilizadores online
-  /getpk <user>                         -> pedir chave publica RSA de <user>
-  /dh_start <user>                      -> iniciar DH efemero com <user>
-  /dh_show                              -> mostrar sessoes DH e chaves derivadas
-  /quit                                 -> sair
------------------------------------------------------
-[SERVIDOR] alice autenticou-se via ZKP e entrou no chat.
-> [SERVIDOR] bob autenticou-se via ZKP e entrou no chat.
-
-> /to Bob mensagem em plaintext
-[MSG] Mensagem EM CLARO enviada para Bob.
-> /send Bob mensagem cifrada
-[MSG] Nao ha sessao DH estabelecida com Bob. Usa /dh_start primeiro.
-> /dh_start bob
-[DH] Iniciado DH com bob. A aguardar DH_REPLY_FROM bob...
-> [DH] Sessao DH com bob COMPLETA (lado iniciador).
-[DH]   Z (primeiros 16 hex): 867581109583c87db125a3f0426fd3ea
-[DH]   K_enc (primeiros 16 hex): ac12804e6bc105d279082f5ee5193bfb
-[DH]   K_mac (primeiros 16 hex): 4dc50e1f07655d1441d75626672c2663
-
-> /dh_show
-[DH] Sessao com bob:
-      Z     (16 hex): 867581109583c87db125a3f0426fd3ea
-      K_enc (16 hex): ac12804e6bc105d279082f5ee5193bfb
-      K_mac (16 hex): 4dc50e1f07655d1441d75626672c2663
-> /list
-> USERS alice, bob
-
-> /send bob mensagem cifrada tentar outra vez
-[MSG] Mensagem cifrada enviada para bob.
-> /send bob !upper mensagem cifrada mas vai ser alterada
-[MSG] Mensagem cifrada enviada para bob.
-> /send_signed bob mensagem cifrada e assinada
-[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
-> /send_signed bob mensagem cifrada e assinada apos bob pedir pk da alice
-[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
-> /send_signed bob !upper mensagem cifrada e assinada mas alterada
-[MSG] Mensagem CIFRADA + ASSINADA enviada para bob.
-> /quit
-[INFO] Cliente terminado.
-
-
-
-Terminal 3:
-$ python3 client.py
-[INFO] A ligar ao servidor em 127.0.0.1:5000...
-OK Ligado ao ChatWithBackdoor v4.0. Use REGISTER ou LOGIN.
-Escolhe um username (identidade local): bob
-Comandos (antes do LOGIN):
-  /register  -> registar username + password + chave publica no servidor
-  /login     -> autenticar com username + password + assinatura de nonce
-  /quit      -> sair
------------------------------------------------------
-> /register
-Escolhe uma password (sem espacos): 
-[INFO] A gerar par de chaves RSA para 'bob'...
-[INFO] Chaves guardadas em bob_priv.pem (encriptada) e bob_pub.pem
-OK REGISTER
-> /login
-Password para ZKP: 
-ZKP_CHALLENGE FgJqAijul7CcTiBWcqf6T4e+L3tiRaH4CdxAfIctMMs=
-ERR LOGIN_ZKP falhou (prova invalida)
-[ERRO] LOGIN falhou. Tenta outra vez.
-> /login
-Password para ZKP: 
-ZKP_CHALLENGE JYPaS2FrAmidf36EYhWRfAlBB1QDUl9wa+jcrfbZpGA=
-OK LOGIN_ZKP
------------------------------------------------------
-[INFO] Autenticado! Agora podes usar o chat, DH e mensagens cifradas.
-Comandos (chat + DH):
-  /to <dest> <mensagem>                 -> enviar EM CLARO (SEM segurança)
-  /send <dest> <mensagem>               -> enviar mensagem CIFRADA (AES-CBC + HMAC + backdoor)
-  /send_signed <dest> <mensagem>        -> enviar mensagem CIFRADA + ASSINADA digitalmente
-  /history <user> [opcoes]              -> historico (ex: -d 2024-12-06, -c 10, ...)
-  /list                                 -> listar utilizadores online
-  /getpk <user>                         -> pedir chave publica RSA de <user>
-  /dh_start <user>                      -> iniciar DH efemero com <user>
-  /dh_show                              -> mostrar sessoes DH e chaves derivadas
-  /quit                                 -> sair
------------------------------------------------------
-[SERVIDOR] bob autenticou-se via ZKP e entrou no chat.
-> FROM alice: mensagem em plaintext
-[DH] Recebido DH_INIT_FROM alice. Sessao DH criada.
-[DH]   Z (primeiros 16 hex): 867581109583c87db125a3f0426fd3ea
-[DH]   K_enc (primeiros 16 hex): ac12804e6bc105d279082f5ee5193bfb
-[DH]   K_mac (primeiros 16 hex): 4dc50e1f07655d1441d75626672c2663
-FROM alice [cifrado+HMAC]: mensagem cifrada tentar outra vez
-FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA MAS VAI SER ALTERADA
-FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
-[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
-
------------------------------------------------------
-[SERVIDOR] bob autenticou-se via ZKP e entrou no chat.
-> FROM alice: mensagem em plaintext
-[DH] Recebido DH_INIT_FROM alice. Sessao DH criada.
-[DH]   Z (primeiros 16 hex): 867581109583c87db125a3f0426fd3ea
-[DH]   K_enc (primeiros 16 hex): ac12804e6bc105d279082f5ee5193bfb
-[DH]   K_mac (primeiros 16 hex): 4dc50e1f07655d1441d75626672c2663
-FROM alice [cifrado+HMAC]: mensagem cifrada tentar outra vez
-FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA MAS VAI SER ALTERADA
-FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
-[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
-
-> FROM alice: mensagem em plaintext
-[DH] Recebido DH_INIT_FROM alice. Sessao DH criada.
-[DH]   Z (primeiros 16 hex): 867581109583c87db125a3f0426fd3ea
-[DH]   K_enc (primeiros 16 hex): ac12804e6bc105d279082f5ee5193bfb
-[DH]   K_mac (primeiros 16 hex): 4dc50e1f07655d1441d75626672c2663
-FROM alice [cifrado+HMAC]: mensagem cifrada tentar outra vez
-FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA MAS VAI SER ALTERADA
-FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
-[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
-
-[DH]   Z (primeiros 16 hex): 867581109583c87db125a3f0426fd3ea
-[DH]   K_enc (primeiros 16 hex): ac12804e6bc105d279082f5ee5193bfb
-[DH]   K_mac (primeiros 16 hex): 4dc50e1f07655d1441d75626672c2663
-FROM alice [cifrado+HMAC]: mensagem cifrada tentar outra vez
-FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA MAS VAI SER ALTERADA
-FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
-[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
-
-FROM alice [cifrado+HMAC]: mensagem cifrada tentar outra vez
-FROM alice [cifrado+HMAC]: MENSAGEM CIFRADA MAS VAI SER ALTERADA
-FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
-[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
-
-FROM alice [cifrado+HMAC][SEM PK PARA VERIFICAR]: mensagem cifrada e assinada
-[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
-
-[INFO] Usa /getpk alice para poderes verificar assinaturas desse utilizador.
-
-
-> /getpk
-Comando desconhecido. Use /to, /send, /send_signed, /history, /list, /getpk, /dh_start, /dh_show, /quit
-> /getpk alice
-> [INFO] Chave publica de alice recebida e guardada (294 bytes DER).
-FROM alice [cifrado+HMAC+ASSIN_OK]: mensagem cifrada e assinada apos bob pedir pk da alice
-FROM alice [cifrado+HMAC+ASSIN_OK]: MENSAGEM CIFRADA E ASSINADA MAS ALTERADA
-[SERVIDOR] alice saiu do chat.
-
-> /quit
-[INFO] Cliente terminado.
-"""

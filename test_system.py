@@ -498,11 +498,10 @@ class TestProtocolIntegration(unittest.TestCase):
             hashes.SHA256(),
         )
         
-        # Embedar assinatura
         b64_sig = base64.b64encode(signature).decode("utf-8")
         plaintext = (msg_text + "||SIG||" + b64_sig).encode("utf-8")
         
-        # Cifrar (simplificado)
+        # Cifrar
         iv = os.urandom(16)
         padder = sympadding.PKCS7(128).padder()
         padded = padder.update(plaintext) + padder.finalize()
